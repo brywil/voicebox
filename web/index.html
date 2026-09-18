@@ -30,6 +30,7 @@
   button { cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
   label.chk { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--muted); }
+  input[type=range] { accent-color: var(--accent); padding: 0; }
   #log { flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 14px; }
   .msg { max-width: 780px; width: 100%; margin: 0 auto; display: flex; gap: 10px; }
   .who {
@@ -66,7 +67,16 @@
   <h1>voicebox</h1>
   <select id="backend" title="Which server answers"></select>
   <select id="model" title="Model on that server"></select>
+  <select id="sttEngine" title="How speech is recognised"></select>
+  <select id="ttsEngine" title="How replies are spoken">
+    <option value="system">voice: system</option>
+    <option value="kokoro">voice: Kokoro (86 MB)</option>
+  </select>
   <select id="voice" title="Speech-out voice"></select>
+  <label class="chk" title="Playback speed">
+    speed <input type="range" id="rate" min="0.5" max="2.5" step="0.05" value="1" style="width:88px" />
+    <span id="rateVal" style="font:12px var(--mono);min-width:2.6em">1.00x</span>
+  </label>
   <label class="chk"><input type="checkbox" id="speak" checked /> speak replies</label>
   <label class="chk"><input type="checkbox" id="autosend" checked /> auto-send on release</label>
   <button id="clear" title="Clear the conversation">clear</button>
@@ -89,7 +99,14 @@ import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transfo
 // Runs on WebGPU when the adapter allows and falls back to WASM, which is
 // perfectly usable at this size.
 // ---------------------------------------------------------------------------
-const STT_MODEL = "onnx-community/whisper-tiny.en";
+// Whisper sizes, smallest first. tiny is fast and mediocre; base and small are
+// noticeably better English and still trivial next to a 4B multimodal model.
+const WHISPER = {
+  "whisper-tiny":  { id: "onnx-community/whisper-tiny.en",  label: "Whisper tiny (~40 MB)" },
+  "whisper-base":  { id: "onnx-community/whisper-base.en",  label: "Whisper base (~80 MB)" },
+  "whisper-small": { id: "onnx-community/whisper-small.en", label: "Whisper small (~250 MB)" },
+};
+let STT_MODEL = WHISPER["whisper-tiny"].id;
 
 // The page is served cross-origin-isolated, so SharedArrayBuffer exists and
 // onnxruntime can run WASM on several threads. Capped well below the core count
@@ -113,6 +130,7 @@ window.addEventListener("unhandledrejection", (e) => {
 const $ = (id) => document.getElementById(id);
 const logEl = $("log"), statusEl = $("status");
 const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
+const sttEngineEl = $("sttEngine");
 const talkBtn = $("talk"), textEl = $("text");
 
 let transcriber = null;
@@ -177,9 +195,30 @@ backendEl.onchange = () => { localStorage.setItem("vb.backend", backendEl.value)
 modelEl.onchange = () => localStorage.setItem("vb.model." + backendEl.value, modelEl.value);
 
 // --- speech out -------------------------------------------------------------
-// The built-in synthesiser: no download at all, offline, and good enough. A
-// neural TTS would cost another ~260 MB for a nicer voice.
-function loadVoices() {
+// Two engines. The system synthesiser is free and instant but on Linux it is
+// the espeak family, which is what "not great" sounds like. Kokoro is an 86 MB
+// ONNX model with 55 voices, loaded only when selected, and only the chosen
+// voice file (~520 KB) is fetched on top of the model.
+const KOKORO_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
+let kokoro = null, kokoroVoices = null, kokoroLoading = null;
+
+const rateEl = $("rate"), rateValEl = $("rateVal");
+const ttsEngineEl = $("ttsEngine");
+let audioEl = new Audio();   // one element, so a new utterance replaces the old
+
+function rate() { return parseFloat(rateEl.value) || 1; }
+rateEl.oninput = () => {
+  rateValEl.textContent = rate().toFixed(2) + "x";
+  localStorage.setItem("vb.rate", rateEl.value);
+  // Kokoro output is an <audio> element, so speed applies live to what is
+  // already playing. The system synthesiser can only take a rate at the moment
+  // an utterance starts.
+  audioEl.playbackRate = rate();
+};
+rateEl.value = localStorage.getItem("vb.rate") || "1";
+rateValEl.textContent = rate().toFixed(2) + "x";
+
+function loadSystemVoices() {
   const vs = speechSynthesis.getVoices();
   if (!vs.length) return;
   voiceEl.innerHTML = "";
@@ -188,21 +227,122 @@ function loadVoices() {
     o.value = v.name; o.textContent = `${v.name} (${v.lang})`;
     voiceEl.appendChild(o);
   }
-  const saved = localStorage.getItem("vb.voice");
+  const saved = localStorage.getItem("vb.voice.system");
   if (saved && vs.some((v) => v.name === saved)) voiceEl.value = saved;
 }
-speechSynthesis.onvoiceschanged = loadVoices;
-loadVoices();
-voiceEl.onchange = () => localStorage.setItem("vb.voice", voiceEl.value);
 
-let speakQueue = "";
+async function ensureKokoro() {
+  if (kokoro) return kokoro;
+  if (kokoroLoading) return kokoroLoading;
+  kokoroLoading = (async () => {
+    status("loading Kokoro voice model (86 MB, cached after the first run)…");
+    const { KokoroTTS } = await import("https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm");
+    // Kokoro is small enough that the CPU path is fine, and WebGPU is not
+    // reliably available here anyway -- same reasoning as the recogniser.
+    kokoro = await KokoroTTS.from_pretrained(KOKORO_MODEL, {
+      dtype: "q8", device: "wasm",
+      progress_callback: (p) => {
+        if (p.status === "progress" && p.total)
+          status(`Kokoro ${(100 * p.loaded / p.total).toFixed(0)}% (${p.file})`);
+      },
+    });
+    kokoroVoices = kokoro.list_voices();
+    status("Kokoro ready — " + kokoroVoices.length + " voices");
+    return kokoro;
+  })();
+  return kokoroLoading;
+}
+
+async function loadKokoroVoices() {
+  voiceEl.innerHTML = `<option>loading…</option>`;
+  try {
+    await ensureKokoro();
+    voiceEl.innerHTML = "";
+    for (const name of kokoroVoices) {
+      const o = document.createElement("option");
+      o.value = name;
+      o.textContent = name;
+      voiceEl.appendChild(o);
+    }
+    const saved = localStorage.getItem("vb.voice.kokoro");
+    if (saved && kokoroVoices.includes(saved)) voiceEl.value = saved;
+    else if (kokoroVoices.includes("af_heart")) voiceEl.value = "af_heart";
+  } catch (e) {
+    voiceEl.innerHTML = `<option value="">(Kokoro failed)</option>`;
+    status("Kokoro unavailable: " + e.message, "err");
+    ttsEngineEl.value = "system";
+    loadSystemVoices();
+  }
+}
+
+speechSynthesis.onvoiceschanged = () => { if (ttsEngineEl.value === "system") loadSystemVoices(); };
+voiceEl.onchange = () => localStorage.setItem("vb.voice." + ttsEngineEl.value, voiceEl.value);
+ttsEngineEl.onchange = async () => {
+  localStorage.setItem("vb.tts", ttsEngineEl.value);
+  stopSpeaking();
+  if (ttsEngineEl.value === "kokoro") await loadKokoroVoices();
+  else loadSystemVoices();
+};
+
+function stopSpeaking() {
+  speechSynthesis.cancel();
+  audioEl.pause();
+  audioEl.currentTime = 0;
+  ttsQueue = [];
+  ttsPlaying = false;
+}
+
+// Sentences are spoken in order. Kokoro generation is async and a later
+// sentence can finish first, so a queue rather than fire-and-forget.
+let ttsQueue = [], ttsPlaying = false;
+
+async function drainTTS() {
+  if (ttsPlaying) return;
+  ttsPlaying = true;
+  while (ttsQueue.length) {
+    const text = ttsQueue.shift();
+    try {
+      if (ttsEngineEl.value === "kokoro") await speakKokoro(text);
+      else await speakSystem(text);
+    } catch (e) {
+      console.warn("[voicebox] tts:", e);
+      status("speech-out failed: " + (e.message || e), "warn");
+    }
+  }
+  ttsPlaying = false;
+}
+
+function speakSystem(text) {
+  return new Promise((resolve) => {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = speechSynthesis.getVoices().find((x) => x.name === voiceEl.value);
+    if (v) u.voice = v;
+    // The spec caps rate at 10 but implementations vary; 2.5 is the useful end.
+    u.rate = rate();
+    u.onend = u.onerror = () => resolve();
+    speechSynthesis.speak(u);
+  });
+}
+
+async function speakKokoro(text) {
+  const tts = await ensureKokoro();
+  const audio = await tts.generate(text, { voice: voiceEl.value || "af_heart" });
+  const url = URL.createObjectURL(audio.toBlob());
+  await new Promise((resolve) => {
+    audioEl.src = url;
+    audioEl.playbackRate = rate();
+    audioEl.onended = audioEl.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    audioEl.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
+  });
+}
+
 function speak(text) {
   if (!$("speak").checked || !text.trim()) return;
-  const u = new SpeechSynthesisUtterance(text);
-  const v = speechSynthesis.getVoices().find((x) => x.name === voiceEl.value);
-  if (v) u.voice = v;
-  speechSynthesis.speak(u);
+  ttsQueue.push(text.trim());
+  drainTTS();
 }
+
+let speakQueue = "";
 // Speak sentence by sentence as the stream arrives, so the reply starts being
 // read aloud while it is still being generated.
 function speakStreaming(delta, flush = false) {
@@ -294,6 +434,101 @@ async function send(userText) {
   }
 }
 
+// --- speech in: engine selection --------------------------------------------
+// Chrome's own recogniser is the same Google speech stack behind Gboard's voice
+// typing, and since Chrome 139 it can run ON DEVICE, so audio need not leave the
+// machine. That is both the best quality available here and the least download:
+// the language pack is Chrome's, not ours.
+//
+// Whisper stays as the portable option -- it works in any browser, and it is the
+// only one that keeps working if Chrome's speech service is unavailable.
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let webSpeechLocal = false;
+
+async function probeWebSpeech() {
+  if (!SR) return null;
+  let avail = "unknown";
+  try {
+    if (typeof SR.available === "function") {
+      // Bounded on purpose. This call can simply never settle when the speech
+      // service is unreachable, and an unbounded await here hangs the whole boot
+      // before the engine list is even built -- the app looks dead over a
+      // capability probe that was only ever advisory.
+      avail = await Promise.race([
+        SR.available({ langs: ["en-US"], processLocally: true }),
+        new Promise((r) => setTimeout(() => r("timeout"), 3000)),
+      ]);
+      webSpeechLocal = avail === "available";
+    }
+  } catch { /* older Chrome: no static available(); cloud path still works */ }
+  return avail;
+}
+
+function sttEngine() { return sttEngineEl.value; }
+
+// Web Speech is event-driven and does its own capture, so it does not share the
+// MediaRecorder path at all.
+function recogniseWebSpeech() {
+  return new Promise((resolve, reject) => {
+    const r = new SR();
+    r.lang = "en-US";
+    r.interimResults = true;
+    r.continuous = false;
+    if ("processLocally" in r) r.processLocally = webSpeechLocal;
+    let finalText = "";
+    r.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalText += t;
+        else interim += t;
+      }
+      status("listening… " + (finalText + interim).slice(-60));
+    };
+    r.onerror = (e) => reject(new Error(e.error === "not-allowed"
+      ? "microphone permission denied" : "speech error: " + e.error));
+    r.onend = () => resolve(finalText.trim());
+    activeRecognition = r;
+    r.start();
+  });
+}
+let activeRecognition = null;
+
+async function loadSttEngines() {
+  const avail = await probeWebSpeech();
+  sttEngineEl.innerHTML = "";
+  if (SR) {
+    const o = document.createElement("option");
+    o.value = "webspeech";
+    o.textContent = webSpeechLocal ? "speech: Chrome (on-device)" : "speech: Chrome (cloud)";
+    o.title = webSpeechLocal
+      ? "Google's recogniser, running locally — audio does not leave this machine"
+      : "Google's recogniser via Chrome's service — audio is sent to Google. "
+        + "On-device reported: " + avail;
+    sttEngineEl.appendChild(o);
+  }
+  for (const [k, v] of Object.entries(WHISPER)) {
+    const o = document.createElement("option");
+    o.value = k; o.textContent = "speech: " + v.label;
+    sttEngineEl.appendChild(o);
+  }
+  const saved = localStorage.getItem("vb.stt");
+  if (saved && [...sttEngineEl.options].some((o) => o.value === saved)) sttEngineEl.value = saved;
+  else sttEngineEl.value = SR ? "webspeech" : "whisper-tiny";
+}
+
+sttEngineEl.onchange = async () => {
+  localStorage.setItem("vb.stt", sttEngineEl.value);
+  if (sttEngine() !== "webspeech") {
+    STT_MODEL = WHISPER[sttEngine()].id;
+    transcriber = null;             // reloaded lazily at next use
+    talkBtn.disabled = true;
+    await ensureWhisper();
+    talkBtn.disabled = false;
+  }
+  status("speech engine: " + sttEngineEl.options[sttEngineEl.selectedIndex].textContent);
+};
+
 // --- microphone -------------------------------------------------------------
 async function initMic() {
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -312,7 +547,18 @@ async function initMic() {
 }
 
 async function startRec() {
-  if (!media || busy) return;
+  if (busy) return;
+  stopSpeaking();                       // barge-in: talking over the reply stops it
+
+  if (sttEngine() === "webspeech") {
+    talkBtn.classList.add("rec");
+    talkBtn.textContent = "release to send";
+    status("listening…");
+    webSpeechPromise = recogniseWebSpeech();
+    return;
+  }
+
+  if (!media) return;
   chunks = [];
   recorder = new MediaRecorder(media);
   recorder.ondataavailable = (e) => chunks.push(e.data);
@@ -322,7 +568,29 @@ async function startRec() {
   status("listening…");
 }
 
+let webSpeechPromise = null;
+
 async function stopRec() {
+  if (sttEngine() === "webspeech") {
+    talkBtn.classList.remove("rec");
+    talkBtn.textContent = "hold to talk";
+    if (!webSpeechPromise) return;
+    status("finishing…");
+    try { activeRecognition?.stop(); } catch { /* already stopping */ }
+    try {
+      const text = (await webSpeechPromise).trim();
+      webSpeechPromise = null;
+      if (!text) { status("heard nothing"); return; }
+      status("transcribed");
+      if ($("autosend").checked) send(text);
+      else { textEl.value = text; status("transcribed — press Enter to send"); }
+    } catch (e) {
+      webSpeechPromise = null;
+      status(e.message, "err");
+    }
+    return;
+  }
+
   if (!recorder || recorder.state === "inactive") return;
   const done = new Promise((res) => (recorder.onstop = res));
   recorder.stop();
@@ -352,6 +620,7 @@ async function stopRec() {
     const pcm = audio.getChannelData(0);
     if (pcm.length < 1600) throw new Error(`only ${(pcm.length / 16000).toFixed(2)}s of audio`);
 
+    await ensureWhisper();
     const out = await transcriber(pcm);
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const text = (out.text || "").trim();
@@ -381,10 +650,32 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
 
 // --- boot -------------------------------------------------------------------
 (async () => {
+ try {
   await loadBackends();
   const haveMic = await initMic();
 
-  status("loading speech recogniser (~40 MB, cached after the first run)…");
+  ttsEngineEl.value = localStorage.getItem("vb.tts") || "system";
+  if (ttsEngineEl.value === "kokoro") loadKokoroVoices(); else loadSystemVoices();
+
+  await loadSttEngines();
+  if (sttEngine() !== "webspeech") { STT_MODEL = WHISPER[sttEngine()].id; await ensureWhisper(); }
+
+  if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
+  status(`ready — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);
+ } catch (e) {
+  // Never leave the status bar reading "starting" forever. A boot that dies
+  // silently is indistinguishable from one that is merely slow, and typing
+  // still works, so the page is worth keeping usable even when speech is not.
+  console.error("[voicebox] boot failed:", e);
+  status("startup failed: " + (e.message || e) + " — typing still works", "err");
+  talkBtn.textContent = "speech unavailable";
+ }
+})();
+
+// ensureWhisper loads (or reloads) the local recogniser for the selected size.
+async function ensureWhisper() {
+  if (transcriber) return transcriber;
+  status("loading speech recogniser (cached after the first run)…");
 
   // Decide the device by actually ASKING for an adapter, not by checking that
   // navigator.gpu exists. `navigator.gpu` is present on any modern Chrome even
@@ -422,10 +713,8 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
       device = "wasm";
     } else throw e;
   }
-
-  if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
-  status(`ready — speech on ${device}, chat via ${backendEl.value}`);
-})();
+  return transcriber;
+}
 </script>
 </body>
 </html>
