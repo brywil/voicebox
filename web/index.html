@@ -54,6 +54,8 @@
     border-color: var(--accent-dim); background: #18241f;
   }
   #talk.rec { background: var(--rec); border-color: var(--rec); color: #fff; }
+  #shush { flex: 0 0 auto; padding: 12px 16px; font-size: 15px; }
+  #shush.active { border-color: var(--rec); color: var(--rec); }
   #text { flex: 1; }
   #status { font: 12px/1.4 var(--mono); color: var(--muted); padding: 6px 16px; border-top: 1px solid var(--edge); }
   #status.err { color: var(--rec); }
@@ -80,6 +82,9 @@
     <span id="rateVal" style="font:12px var(--mono);min-width:2.6em">1.00x</span>
   </label>
   <label class="chk"><input type="checkbox" id="speak" checked /> speak replies</label>
+  <label class="chk" title="Read the model's reasoning aloud as a quieter aside">
+    <input type="checkbox" id="speakThink" /> speak thinking</label>
+  <select id="thinkVoice" title="Voice for the inner monologue" style="display:none"></select>
   <label class="chk"><input type="checkbox" id="autosend" checked /> auto-send on release</label>
   <label class="chk" title="Tell the model whether each message was spoken or typed">
     <input type="checkbox" id="tagInput" checked /> tag input mode</label>
@@ -90,6 +95,7 @@
 
 <footer>
   <button id="talk" disabled>loading…</button>
+  <button id="shush" title="Stop speaking (Esc)" disabled>⏹</button>
   <input id="text" placeholder="…or type here and press Enter" />
 </footer>
 <div id="status">starting</div>
@@ -135,6 +141,7 @@ const $ = (id) => document.getElementById(id);
 const logEl = $("log"), statusEl = $("status");
 const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
 const sttEngineEl = $("sttEngine"), effortEl = $("effort");
+const thinkVoiceEl = $("thinkVoice"), shushBtn = $("shush");
 const talkBtn = $("talk"), textEl = $("text");
 
 // Telling the model that a message was dictated helps it read past recogniser
@@ -285,6 +292,33 @@ async function loadEffort() {
 }
 
 effortEl.onchange = () => localStorage.setItem("vb.effort." + backendEl.value, effortEl.value);
+
+// The aside voice is picked from the same list as the main one; defaulting to a
+// DIFFERENT entry is the whole point, so the two are told apart by ear.
+function syncThinkVoices() {
+  const on = $("speakThink").checked;
+  thinkVoiceEl.style.display = on ? "" : "none";
+  if (!on) return;
+  const opts = [...voiceEl.options].map((o) => ({ v: o.value, t: o.textContent }));
+  thinkVoiceEl.innerHTML = "";
+  for (const o of opts) {
+    const e = document.createElement("option");
+    e.value = o.v; e.textContent = "think: " + o.t;
+    thinkVoiceEl.appendChild(e);
+  }
+  const saved = localStorage.getItem("vb.thinkvoice");
+  if (saved && opts.some((o) => o.v === saved)) thinkVoiceEl.value = saved;
+  else {
+    const other = opts.find((o) => o.v !== voiceEl.value);
+    if (other) thinkVoiceEl.value = other.v;
+  }
+}
+thinkVoiceEl.onchange = () => localStorage.setItem("vb.thinkvoice", thinkVoiceEl.value);
+$("speakThink").onchange = () => {
+  localStorage.setItem("vb.speakthink", $("speakThink").checked ? "1" : "0");
+  syncThinkVoices();
+  if (!$("speakThink").checked) thinkQueue = "";
+};
 
 // applyEffort adds whichever field this model actually reads.
 function applyEffort(body) {
@@ -441,6 +475,7 @@ async function loadPiperVoices() {
     }
     const saved = localStorage.getItem("vb.voice.piper");
     if (saved && piperVoices.some((v) => v.id === saved)) voiceEl.value = saved;
+    syncThinkVoices();
     status(`Piper ready — ${piperVoices.length} voices, on the server`);
   } catch (e) {
     voiceEl.innerHTML = `<option value="">(unavailable)</option>`;
@@ -450,12 +485,22 @@ async function loadPiperVoices() {
   }
 }
 
-async function speakPiper(text) {
+async function speakPiper(text, role = "reply") {
   const t0 = performance.now();
+  // Thinking is an ASIDE: a different voice, quieter, and a shade quicker. The
+  // point is that you can tell without listening for it whether the model is
+  // reasoning or answering -- otherwise a long chain of thought is
+  // indistinguishable from the reply and you cannot tell when the answer starts.
+  const aside = role === "thinking";
   const r = await fetch("/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, voice: voiceEl.value, rate: rate() }),
+    body: JSON.stringify({
+      text,
+      voice: aside ? (thinkVoiceEl.value || voiceEl.value) : voiceEl.value,
+      rate: rate() * (aside ? 1.15 : 1),
+      volume: aside ? 0.65 : 1.0,
+    }),
   });
   if (!r.ok) throw new Error(`tts HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
   const blob = await r.blob();
@@ -471,42 +516,64 @@ async function speakPiper(text) {
   console.log(`[voicebox] piper: ${((performance.now() - t0) / 1000).toFixed(2)}s for ${text.length} chars`);
 }
 
+// Interrupting matters more than it sounds. A reasoning model can produce
+// minutes of speech, and without a way to cut it off the only options are
+// waiting it out or reloading the page.
 function stopSpeaking() {
   speechSynthesis.cancel();
   audioEl.pause();
   audioEl.currentTime = 0;
   ttsQueue = [];
   ttsPlaying = false;
+  speakQueue = "";
+  setSpeaking(false);
 }
+
+shushBtn.onclick = () => { stopSpeaking(); status("speech stopped"); };
+// Esc anywhere, because reaching for a button while something is talking at you
+// is exactly the moment you do not want to be aiming a mouse.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { stopSpeaking(); status("speech stopped"); }
+});
 
 // Sentences are spoken in order. Kokoro generation is async and a later
 // sentence can finish first, so a queue rather than fire-and-forget.
 let ttsQueue = [], ttsPlaying = false;
 
+function setSpeaking(on) {
+  shushBtn.disabled = !on;
+  shushBtn.classList.toggle("active", on);
+}
+
 async function drainTTS() {
   if (ttsPlaying) return;
   ttsPlaying = true;
+  setSpeaking(true);
   while (ttsQueue.length) {
-    const text = ttsQueue.shift();
+    const { text, role } = ttsQueue.shift();
     try {
-      if (ttsEngineEl.value === "piper") await speakPiper(text);
+      if (ttsEngineEl.value === "piper") await speakPiper(text, role);
       else if (ttsEngineEl.value === "kokoro") await speakKokoro(text);
-      else await speakSystem(text);
+      else await speakSystem(text, role);
     } catch (e) {
       console.warn("[voicebox] tts:", e);
       status("speech-out failed: " + (e.message || e), "warn");
     }
   }
   ttsPlaying = false;
+  setSpeaking(false);
 }
 
-function speakSystem(text) {
+function speakSystem(text, role = "reply") {
   return new Promise((resolve) => {
+    const aside = role === "thinking";
     const u = new SpeechSynthesisUtterance(text);
-    const v = speechSynthesis.getVoices().find((x) => x.name === voiceEl.value);
+    const want = aside ? (thinkVoiceEl.value || voiceEl.value) : voiceEl.value;
+    const v = speechSynthesis.getVoices().find((x) => x.name === want);
     if (v) u.voice = v;
+    if (aside) { u.volume = 0.65; u.pitch = 0.9; }
     // The spec caps rate at 10 but implementations vary; 2.5 is the useful end.
-    u.rate = rate();
+    u.rate = rate() * (aside ? 1.15 : 1);
     u.onend = u.onerror = () => resolve();
     speechSynthesis.speak(u);
   });
@@ -534,13 +601,57 @@ async function speakKokoro(text) {
   });
 }
 
-function speak(text) {
-  if (!$("speak").checked || !text.trim()) return;
-  ttsQueue.push(text.trim());
+function speak(text, role = "reply") {
+  if (!$("speak").checked) return;
+  const clean = speakableText(text);
+  // A chunk that was ONLY markup -- a table row, a fence -- has nothing to say.
+  if (!clean || !/[a-z0-9]/i.test(clean)) return;
+  ttsQueue.push({ text: clean, role });
   drainTTS();
 }
 
-let speakQueue = "";
+// Markdown is written to be READ, not spoken. Piper says "asterisk asterisk"
+// for **bold**, spells out URLs character by character, and reads a fenced code
+// block line by line including the backticks. None of that carries meaning in
+// audio, so the text is cleaned on the way to the synthesiser only -- the
+// transcript on screen keeps its formatting.
+function speakableText(md) {
+  let t = md;
+  t = t.replace(/```[\s\S]*?```/g, " (code block) ");       // never read code aloud
+  t = t.replace(/~~~[\s\S]*?~~~/g, " (code block) ");
+  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, " ");             // images
+  t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");           // [text](url) -> text
+  t = t.replace(/<https?:\/\/[^>]+>/g, " link ");
+  t = t.replace(/\bhttps?:\/\/\S+/g, " link ");             // a spoken URL is noise
+  t = t.replace(/`([^`]+)`/g, "$1");                        // inline code
+  t = t.replace(/(\*\*\*|___)(.+?)\1/g, "$2");              // bold+italic
+  t = t.replace(/(\*\*|__)(.+?)\1/g, "$2");                  // bold
+  t = t.replace(/(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])/g, "$1");  // italic
+  t = t.replace(/(?<![\w_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])/g, "$1");
+  t = t.replace(/~~(.+?)~~/g, "$1");                        // strikethrough
+  t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "");                 // headings
+  t = t.replace(/^\s{0,3}>\s?/gm, "");                      // blockquotes
+  t = t.replace(/^\s*[-*+]\s+/gm, "");                      // bullets
+  t = t.replace(/^\s*\d+\.\s+/gm, "");                      // numbered items keep their text
+  t = t.replace(/^\s*\|.*\|\s*$/gm, " ");                   // table rows: unreadable aloud
+  t = t.replace(/^\s*[-:|\s]{4,}$/gm, " ");                  // table rules and --- lines
+  t = t.replace(/[ \t]{2,}/g, " ");
+  return t.replace(/\n{2,}/g, "\n").trim();
+}
+
+let speakQueue = "", thinkQueue = "";
+
+// Reasoning is spoken sentence by sentence like the reply, but tagged so the
+// synthesiser can give it a different voice.
+function speakThinkingStream(delta, flush = false) {
+  if (!$("speakThink").checked) return;
+  thinkQueue += delta;
+  let m;
+  while ((m = thinkQueue.match(/^[\s\S]*?[.!?…](\s|$)/))) {
+    speak(m[0], "thinking"); thinkQueue = thinkQueue.slice(m[0].length);
+  }
+  if (flush && thinkQueue.trim()) { speak(thinkQueue, "thinking"); thinkQueue = ""; }
+}
 // Speak sentence by sentence as the stream arrives, so the reply starts being
 // read aloud while it is still being generated.
 function speakStreaming(delta, flush = false) {
@@ -611,10 +722,14 @@ async function send(userText, source = "typed") {
                 out.parentNode.insertBefore(thinkEl, out);
               }
               thinkEl.querySelector("div").textContent = thinking;
+              speakThinkingStream(think);
               logEl.scrollTop = logEl.scrollHeight;
             }
             const d = delta.content;
             if (d) {
+              // The answer has begun; stop reading the reasoning aloud rather
+              // than queueing an aside behind the thing it was preamble to.
+              if (!full && thinkQueue) thinkQueue = "";
               full += d;
               if (full.length < 40) full = stripTag(full);   // only ever a prefix
               out.textContent = full;
@@ -863,6 +978,8 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
   await loadBackends();
   const haveMic = await initMic();
 
+  $("speakThink").checked = localStorage.getItem("vb.speakthink") === "1";
+  setSpeaking(false);
   $("tagInput").checked = localStorage.getItem("vb.tag") !== "0";
   $("tagInput").onchange = () => localStorage.setItem("vb.tag", $("tagInput").checked ? "1" : "0");
   ttsEngineEl.value = localStorage.getItem("vb.tts") || (SERVER_TTS ? "piper" : "system");
@@ -876,6 +993,7 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
   if (sttEngine() !== "webspeech") { STT_MODEL = WHISPER[sttEngine()].id; await ensureWhisper(); }
 
   if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
+  syncThinkVoices();
   status(`ready [build ${BUILD}] — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);
  } catch (e) {
   // Never leave the status bar reading "starting" forever. A boot that dies

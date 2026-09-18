@@ -65,10 +65,13 @@ def get_voice(vid: str) -> PiperVoice:
     return v
 
 
-def synth(text: str, vid: str, rate: float) -> bytes:
+def synth(text: str, vid: str, rate: float, volume: float = 1.0) -> bytes:
     voice = get_voice(vid)
     # length_scale is duration per phoneme, so it is the INVERSE of speed.
-    cfg = SynthesisConfig(length_scale=max(0.3, min(3.0, 1.0 / max(0.25, rate))))
+    cfg = SynthesisConfig(
+        length_scale=max(0.3, min(3.0, 1.0 / max(0.25, rate))),
+        volume=max(0.1, min(1.0, volume)),
+    )
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         voice.synthesize_wav(text, w, syn_config=cfg)
@@ -108,7 +111,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, b'{"error":"no text"}')
                 return
             vid = req.get("voice") or (available()[0]["id"] if available() else "")
-            wav = synth(text, vid, float(req.get("rate") or 1.0))
+            wav = synth(text, vid, float(req.get("rate") or 1.0),
+                        float(req.get("volume") or 1.0))
             self._send(200, wav, "audio/wav")
         except KeyError as e:
             self._send(404, json.dumps({"error": f"no such voice {e}"}).encode())

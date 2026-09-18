@@ -169,6 +169,29 @@ Kokoro uses playback rate.
 Note for anyone reading the kokoro-js docs: `list_voices()` only calls
 `console.table()` and returns **undefined**. The data is the `voices` getter.
 
+## What gets spoken
+
+Markdown is written to be read, not spoken. Piper says "asterisk asterisk" for
+`**bold**`, spells URLs out character by character, and reads a fenced code block
+line by line including the backticks. The text is therefore cleaned on the way to
+the synthesiser only — the transcript on screen keeps its formatting.
+
+Code blocks become "(code block)", links keep their text and lose their URL,
+tables are dropped outright. Things that merely look like markup are left alone:
+`2 * 3 * 4` and `snake_case_name` survive intact, which is most of why the
+patterns are fussier than they first appear.
+
+**Interrupting.** A reasoning model can produce minutes of speech. `⏹` or **Esc**
+stops it dead and clears the queue; starting to talk does too, so barging in
+works. Without that the only options were waiting it out or reloading.
+
+**Thinking aloud.** With "speak thinking" on, the model's reasoning is read in a
+*different voice*, quieter (volume 0.65, measured: peak amplitude 32767 → 21298)
+and slightly faster. It is an aside, and it should sound like one — otherwise a
+long chain of thought is indistinguishable from the answer and you cannot hear
+where the reply starts. When the answer does begin, any unspoken reasoning is
+dropped rather than queued in front of it.
+
 ## Thinking level
 
 The dropdown is **discovered, not assumed**. There is no single way to ask a
