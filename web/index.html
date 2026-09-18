@@ -154,6 +154,7 @@ let transcriber = null;
 let media = null, recorder = null, chunks = [];
 let history = [];
 let busy = false;
+let BUILD = "?";
 
 function status(msg, kind = "") { statusEl.textContent = msg; statusEl.className = kind; }
 
@@ -179,6 +180,8 @@ async function loadBackends() {
     o.disabled = b.needs_key && !b.has_key;
     backendEl.appendChild(o);
   }
+  BUILD = d.build || "?";
+  console.log("[voicebox] page build", BUILD);
   backendEl.value = localStorage.getItem("vb.backend") || d.default;
   await loadModels();
 }
@@ -251,6 +254,10 @@ function loadSystemVoices() {
 async function ensureKokoro() {
   if (kokoro) return kokoro;
   if (kokoroLoading) return kokoroLoading;
+  // On failure the in-flight promise MUST be cleared. Memoising a rejected
+  // promise means the first failure is replayed verbatim on every later attempt,
+  // so a fixed page still reports the old error until a full reload -- which is
+  // indistinguishable from the fix not working.
   kokoroLoading = (async () => {
     status("loading Kokoro voice model (86 MB, cached after the first run)…");
     const { KokoroTTS } = await import("https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm");
@@ -269,7 +276,7 @@ async function ensureKokoro() {
     kokoroVoices = kokoro.voices || {};
     status("Kokoro ready — " + Object.keys(kokoroVoices).length + " voices");
     return kokoro;
-  })();
+  })().catch((e) => { kokoroLoading = null; kokoro = null; throw e; });
   return kokoroLoading;
 }
 
@@ -707,7 +714,7 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
   if (sttEngine() !== "webspeech") { STT_MODEL = WHISPER[sttEngine()].id; await ensureWhisper(); }
 
   if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
-  status(`ready — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);
+  status(`ready [build ${BUILD}] — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);
  } catch (e) {
   // Never leave the status bar reading "starting" forever. A boot that dies
   // silently is indistinguishable from one that is merely slow, and typing

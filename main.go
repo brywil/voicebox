@@ -76,8 +76,9 @@ func main() {
 		}
 		out := struct {
 			Default  string `json:"default"`
+			Build    string `json:"build"`
 			Backends []view `json:"backends"`
-		}{Default: cfg.Default}
+		}{Default: cfg.Default, Build: buildID(*webDir)}
 		for _, b := range cfg.Backends {
 			out.Backends = append(out.Backends, view{
 				ID: b.ID, Label: b.Label,
@@ -236,6 +237,17 @@ func logRequests(h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+// buildID identifies the page currently on disk, so the UI can show which
+// version is actually loaded. A stale tab reporting an already-fixed error is
+// otherwise impossible to tell apart from a fix that did not work.
+func buildID(webDir string) string {
+	fi, err := os.Stat(webDir + "/index.html")
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%s-%d", fi.ModTime().UTC().Format("0102-1504"), fi.Size()%10000)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
