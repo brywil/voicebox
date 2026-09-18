@@ -209,9 +209,22 @@ func newProxy(b *Backend) *httputil.ReverseProxy {
 // noCache keeps the browser from serving a stale index.html while it is being
 // edited. The model weights are cached by transformers.js in the Cache API,
 // which this does not touch.
+//
+// It also sets the two headers that make the page CROSS-ORIGIN ISOLATED, which
+// is what unlocks SharedArrayBuffer -- and therefore multi-threaded WASM in
+// onnxruntime. Without them, speech recognition on the CPU path runs on one
+// thread and is slow enough to look hung rather than slow.
+//
+// COEP is "credentialless" rather than "require-corp" deliberately: require-corp
+// demands a CORP header on every cross-origin resource, which the jsdelivr CDN
+// and the HuggingFace model files do not send, so it would break the very
+// downloads it is meant to speed up. credentialless instead sends those requests
+// without credentials, which is exactly right for public static assets.
 func noCache(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "credentialless")
 		h.ServeHTTP(w, r)
 	})
 }

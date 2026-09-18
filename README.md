@@ -66,9 +66,27 @@ That flag needs its own profile dir, and it is a testing aid, not a deployment.
 | the model | your server | 0 bytes in the browser |
 | text → speech | browser, built-in `speechSynthesis` | 0 bytes |
 
-WebGPU is used for speech recognition when available and falls back to CPU
-automatically. At this size the fallback is genuinely fine — that is the whole
-point of not putting a 4B multimodal model in the browser.
+WebGPU is used for speech recognition when an adapter is actually obtainable,
+and falls back to CPU otherwise. The check calls `requestAdapter()` rather than
+testing that `navigator.gpu` exists — the object is present on any modern Chrome
+even where no adapter can be had, and asking for `webgpu` anyway throws from
+inside onnxruntime in a parallel `Promise.all` whose sibling rejections escape
+any try/catch the caller writes.
+
+The CPU path is threaded. voicebox serves the page with `Cross-Origin-Opener-
+Policy: same-origin` and `Cross-Origin-Embedder-Policy: credentialless`, which
+makes the page cross-origin isolated, which is what unlocks `SharedArrayBuffer`
+and therefore multi-threaded WASM. Without those headers onnxruntime runs on one
+thread and is slow enough to look hung rather than slow.
+
+COEP is `credentialless`, not `require-corp`: require-corp demands a CORP header
+on every cross-origin resource, and neither the jsdelivr CDN nor the HuggingFace
+model files send one, so it would break the downloads it is meant to accelerate.
+Verified isolated with the CDN still importing (`crossOriginIsolated=true`,
+`SharedArrayBuffer=true`, 963 exports imported).
+
+At this size the CPU fallback is genuinely fine — that is the whole point of not
+putting a 4B multimodal model in the browser.
 
 ## Reasoning models
 

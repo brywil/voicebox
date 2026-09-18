@@ -91,6 +91,25 @@ import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transfo
 // ---------------------------------------------------------------------------
 const STT_MODEL = "onnx-community/whisper-tiny.en";
 
+// The page is served cross-origin-isolated, so SharedArrayBuffer exists and
+// onnxruntime can run WASM on several threads. Capped well below the core count
+// on purpose: whisper-tiny is small enough that past a handful of threads the
+// synchronisation costs more than the parallelism returns, and this box reports
+// 40 cores.
+env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(8, navigator.hardwareConcurrency || 4));
+
+// onnxruntime loads several sub-models under Promise.all; when one backend is
+// unavailable, siblings can reject after the failure has already been handled.
+// Those are noise, not faults -- log them, do not let them read as a crash.
+window.addEventListener("unhandledrejection", (e) => {
+  const m = e.reason?.message || String(e.reason);
+  console.warn("[voicebox] late rejection:", e.reason);
+  // Shown, never swallowed. Suppressing these once hid a real transcription
+  // failure behind a status line that simply said "transcribing…" forever.
+  const el = document.getElementById("status");
+  if (el && !el.classList.contains("err")) { el.textContent = "async: " + m; el.className = "warn"; }
+});
+
 const $ = (id) => document.getElementById(id);
 const logEl = $("log"), statusEl = $("status");
 const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
@@ -312,19 +331,41 @@ async function stopRec() {
   talkBtn.textContent = "hold to talk";
   status("transcribing…");
 
-  const blob = new Blob(chunks, { type: recorder.mimeType });
-  const buf = await blob.arrayBuffer();
-  // Whisper wants 16 kHz mono float32.
-  const ctx = new AudioContext({ sampleRate: 16000 });
-  const audio = await ctx.decodeAudioData(buf);
-  const pcm = audio.getChannelData(0);
-  await ctx.close();
+  talkBtn.disabled = true;
+  // A stalled transcription used to be indistinguishable from a crashed one.
+  // Ticking the elapsed time makes "slow" and "stuck" tell themselves apart.
+  const t0 = performance.now();
+  const tick = setInterval(
+    () => status(`transcribing… ${((performance.now() - t0) / 1000).toFixed(1)}s`), 200);
+  try {
+    const blob = new Blob(chunks, { type: recorder.mimeType });
+    if (!blob.size) throw new Error("recorder produced no audio");
+    const buf = await blob.arrayBuffer();
 
-  const out = await transcriber(pcm);
-  const text = (out.text || "").trim();
-  if (!text) { status("heard nothing"); return; }
-  if ($("autosend").checked) send(text);
-  else { textEl.value = text; status("transcribed — press Enter to send"); }
+    // Whisper wants 16 kHz mono float32. decodeAudioData resamples into the
+    // context's rate, so the context is created at 16 kHz rather than resampling
+    // by hand afterwards.
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    let audio;
+    try { audio = await ctx.decodeAudioData(buf); }
+    finally { await ctx.close(); }
+    const pcm = audio.getChannelData(0);
+    if (pcm.length < 1600) throw new Error(`only ${(pcm.length / 16000).toFixed(2)}s of audio`);
+
+    const out = await transcriber(pcm);
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    const text = (out.text || "").trim();
+    if (!text) { status(`heard nothing (${secs}s)`); return; }
+    status(`transcribed in ${secs}s`);
+    if ($("autosend").checked) send(text);
+    else { textEl.value = text; status(`transcribed in ${secs}s — press Enter to send`); }
+  } catch (e) {
+    console.error("[voicebox] transcription failed:", e);
+    status("transcription failed: " + (e.message || e), "err");
+  } finally {
+    clearInterval(tick);
+    if (!busy) talkBtn.disabled = false;
+  }
 }
 
 talkBtn.addEventListener("mousedown", startRec);
@@ -344,22 +385,42 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
   const haveMic = await initMic();
 
   status("loading speech recogniser (~40 MB, cached after the first run)…");
-  let device = "webgpu";
-  if (!navigator.gpu) device = "wasm";
+
+  // Decide the device by actually ASKING for an adapter, not by checking that
+  // navigator.gpu exists. `navigator.gpu` is present on any modern Chrome even
+  // when no adapter can be had -- a GPU already full of llama-server is the
+  // common case here -- and requesting "webgpu" then throws from deep inside
+  // onnxruntime, in a parallel Promise.all whose sibling rejections surface as
+  // "Uncaught (in promise)" no matter what the caller wraps in try/catch.
+  let device = "wasm";
+  if (navigator.gpu) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter) device = "webgpu";
+      else status("no WebGPU adapter (GPU busy or unavailable) — speech on CPU", "warn");
+    } catch (e) {
+      status("WebGPU unavailable (" + e.message + ") — speech on CPU", "warn");
+    }
+  }
+
+  const opts = {
+    dtype: "q8",
+    progress_callback: (p) => {
+      if (p.status === "progress" && p.total)
+        status(`speech recogniser ${(100 * p.loaded / p.total).toFixed(0)}% (${p.file})`);
+    },
+  };
   try {
-    transcriber = await pipeline("automatic-speech-recognition", STT_MODEL, {
-      device, dtype: "q8",
-      progress_callback: (p) => {
-        if (p.status === "progress" && p.total)
-          status(`speech recogniser ${(100 * p.loaded / p.total).toFixed(0)}% (${p.file})`);
-      },
-    });
+    transcriber = await pipeline("automatic-speech-recognition", STT_MODEL, { device, ...opts });
   } catch (e) {
-    // Same fallback the Gemma space uses, but here it is cheap: whisper-tiny on
-    // CPU is fine, where a 4B model on CPU is not.
-    status("WebGPU unavailable for STT, using CPU: " + e.message, "warn");
-    transcriber = await pipeline("automatic-speech-recognition", STT_MODEL, { device: "wasm", dtype: "q8" });
-    device = "wasm";
+    // Belt and braces: an adapter can vanish between the probe and the load.
+    // whisper-tiny on CPU is genuinely fine -- that is the entire reason this
+    // is a 40 MB recogniser and not a 4B multimodal model.
+    if (device === "webgpu") {
+      status("WebGPU load failed, retrying on CPU: " + e.message, "warn");
+      transcriber = await pipeline("automatic-speech-recognition", STT_MODEL, { device: "wasm", ...opts });
+      device = "wasm";
+    } else throw e;
   }
 
   if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
