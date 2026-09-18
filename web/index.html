@@ -1295,7 +1295,16 @@ if (TOUCH) {
 }
 
 textEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && textEl.value.trim()) { const v = textEl.value; textEl.value = ""; send(v, "typed"); }
+  if (e.key === "Enter" && textEl.value.trim()) {
+    const v = textEl.value;
+    textEl.value = "";
+    send(v, "typed");
+    // In keyboard mode the field IS the interface, so keep it focused: the
+    // keyboard stays up and the next turn costs one tap on its microphone
+    // rather than a tap on the field and then the microphone. Blurring after
+    // every send made a conversation twice the taps it needed to be.
+    if (sttEngine() === "keyboard") setTimeout(() => textEl.focus(), 0);
+  }
 });
 $("clear").onclick = () => {
   history = []; logEl.innerHTML = ""; stopSpeaking(); setPanel(false); status("cleared");
