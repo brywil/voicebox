@@ -95,6 +95,17 @@ func main() {
 		writeJSON(w, out)
 	})
 
+	// Ask a backend what reasoning control it actually supports, rather than
+	// offering a fixed list that is wrong for most models.
+	mux.HandleFunc("/api/effort", func(w http.ResponseWriter, r *http.Request) {
+		b := cfg.find(orDefault(r.URL.Query().Get("backend"), cfg.Default))
+		if b == nil {
+			http.Error(w, "unknown backend", http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, detectEffort(b, r.URL.Query().Get("model")))
+	})
+
 	// /v1/... proxies to the backend named by the X-Voicebox-Backend header (or
 	// ?backend=), defaulting to cfg.Default.
 	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
@@ -277,6 +288,16 @@ func buildID(webDir string) string {
 	}
 	return fmt.Sprintf("%s-%d", fi.ModTime().UTC().Format("0102-1504"), fi.Size()%10000)
 }
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// envOf exists so effort.go does not import os just for this.
+func envOf(k string) string { return os.Getenv(k) }
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

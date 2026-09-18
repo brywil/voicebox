@@ -73,6 +73,7 @@
     <option value="system">voice: system</option>
     <option value="kokoro">voice: Kokoro (in-browser)</option>
   </select>
+  <select id="effort" title="How hard the model should think" style="display:none"></select>
   <select id="voice" title="Speech-out voice"></select>
   <label class="chk" title="Playback speed">
     speed <input type="range" id="rate" min="0.5" max="2.5" step="0.05" value="1" style="width:88px" />
@@ -133,7 +134,7 @@ window.addEventListener("unhandledrejection", (e) => {
 const $ = (id) => document.getElementById(id);
 const logEl = $("log"), statusEl = $("status");
 const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
-const sttEngineEl = $("sttEngine");
+const sttEngineEl = $("sttEngine"), effortEl = $("effort");
 const talkBtn = $("talk"), textEl = $("text");
 
 // Telling the model that a message was dictated helps it read past recogniser
@@ -233,8 +234,75 @@ async function loadModels() {
   }
 }
 
-backendEl.onchange = () => { localStorage.setItem("vb.backend", backendEl.value); loadModels(); };
-modelEl.onchange = () => localStorage.setItem("vb.model." + backendEl.value, modelEl.value);
+backendEl.onchange = async () => {
+  localStorage.setItem("vb.backend", backendEl.value);
+  await loadModels();
+  loadEffort();
+};
+modelEl.onchange = () => {
+  localStorage.setItem("vb.model." + backendEl.value, modelEl.value);
+  // Reasoning support is a property of the WEIGHTS, not the server, so it has
+  // to be re-asked whenever the model changes.
+  loadEffort();
+};
+
+// --- how hard the model should think --------------------------------------
+// The control is discovered, not assumed: the server interrogates the backend
+// (llama.cpp /props, ollama /api/show) and reports which mechanism, if any, that
+// model actually honours. Different families spell this differently and most
+// models have no such knob at all, so a fixed dropdown would be wrong more often
+// than right. Hidden entirely when nothing is supported.
+let effortKnob = { kind: "none" };
+
+async function loadEffort() {
+  effortKnob = { kind: "none" };
+  effortEl.style.display = "none";
+  try {
+    const q = new URLSearchParams({ backend: backendEl.value, model: modelEl.value || "" });
+    const r = await fetch("/api/effort?" + q);
+    if (!r.ok) return;
+    effortKnob = await r.json();
+    if (effortKnob.kind === "none" || !(effortKnob.levels || []).length) return;
+
+    effortEl.innerHTML = "";
+    const auto = document.createElement("option");
+    auto.value = ""; auto.textContent = "think: default";
+    effortEl.appendChild(auto);
+    effortKnob.levels.forEach((lv, i) => {
+      const o = document.createElement("option");
+      o.value = lv;
+      o.textContent = "think: " + (effortKnob.labels?.[i] || lv);
+      effortEl.appendChild(o);
+    });
+    effortEl.title = effortKnob.source + "  (" +
+      (effortKnob.kind === "reasoning_effort"
+        ? "sent as reasoning_effort"
+        : "sent as chat_template_kwargs." + effortKnob.variable) + ")";
+    const saved = localStorage.getItem("vb.effort." + backendEl.value);
+    if (saved && effortKnob.levels.includes(saved)) effortEl.value = saved;
+    effortEl.style.display = "";
+  } catch { /* no control offered; the dropdown stays hidden */ }
+}
+
+effortEl.onchange = () => localStorage.setItem("vb.effort." + backendEl.value, effortEl.value);
+
+// applyEffort adds whichever field this model actually reads.
+function applyEffort(body) {
+  const lv = effortEl.value;
+  if (!lv || effortKnob.kind === "none") return body;
+  if (effortKnob.kind === "reasoning_effort") {
+    body.reasoning_effort = lv;
+  } else if (effortKnob.kind === "chat_template_kwargs") {
+    // The value must be the JSON TYPE the template expects, not a string that
+    // looks like it. llama.cpp validates: sending "true" for a boolean knob is
+    // rejected outright with
+    //   invalid type for "enable_thinking" (expected boolean, got string)
+    // so a boolean level is converted rather than passed through.
+    const val = lv === "true" ? true : lv === "false" ? false : lv;
+    body.chat_template_kwargs = { ...(body.chat_template_kwargs || {}), [effortKnob.variable]: val };
+  }
+  return body;
+}
 
 // --- speech out -------------------------------------------------------------
 // Two engines. The system synthesiser is free and instant but on Linux it is
@@ -506,12 +574,12 @@ async function send(userText, source = "typed") {
       headers: { "Content-Type": "application/json", "X-Voicebox-Backend": backendEl.value },
       // Built per request rather than stored in history, so toggling the
       // checkbox takes effect immediately instead of only for new conversations.
-      body: JSON.stringify({
+      body: JSON.stringify(applyEffort({
         model: modelEl.value, stream: true,
         messages: ($("tagInput").checked && history.some((m) => m.content.startsWith("[voice] ")))
           ? [{ role: "system", content: INPUT_MODE_PREAMBLE }, ...history]
           : history.map((m) => ({ ...m, content: stripTag(m.content) })),
-      }),
+      })),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
 
@@ -803,6 +871,7 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
   else if (ttsEngineEl.value === "kokoro") loadKokoroVoices();
   else loadSystemVoices();
 
+  await loadEffort();
   await loadSttEngines();
   if (sttEngine() !== "webspeech") { STT_MODEL = WHISPER[sttEngine()].id; await ensureWhisper(); }
 

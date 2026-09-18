@@ -169,6 +169,46 @@ Kokoro uses playback rate.
 Note for anyone reading the kokoro-js docs: `list_voices()` only calls
 `console.table()` and returns **undefined**. The data is the `voices` getter.
 
+## Thinking level
+
+The dropdown is **discovered, not assumed**. There is no single way to ask a
+model how hard to think, so the server interrogates the backend and reports what
+that model actually honours. Three answers, most direct first:
+
+| source | mechanism | seen on |
+|---|---|---|
+| llama.cpp `/props` → `chat_template_caps.supports_reasoning_effort` | `reasoning_effort` | models declaring it |
+| llama.cpp `/props` → `chat_template` scanned for a knob variable | `chat_template_kwargs` | granite → `enable_thinking` |
+| ollama `/api/show` → `capabilities` contains `thinking` | `reasoning_effort` | glm-5.3-flash |
+
+Families spell it differently — Muse-Glimmer `reasoning_strength`, gpt-oss
+`reasoning_effort`, Qwen3 a boolean `enable_thinking` — and most models have no
+such knob, so a fixed list would be wrong more often than right. The control is
+hidden entirely when nothing is supported, and re-asked whenever the model
+changes, because the capability belongs to the weights rather than the server.
+
+**The value must be the JSON type the template expects.** llama.cpp validates and
+rejects a string standing in for a boolean:
+
+```
+invalid type for "enable_thinking" (expected boolean, got string)
+```
+
+so `true`/`false` levels are converted to real booleans while `low`/`medium`/
+`high` stay strings.
+
+Both mechanisms verified end to end. `enable_thinking=true` on granite returned
+*empty content* within an 80-token cap — it spent the whole budget thinking.
+On ollama cloud, three reps per level separate cleanly with no overlap:
+
+| | reasoning chars | completion tokens |
+|---|---|---|
+| low | 89, 47, 47 | 136, 115, 111 |
+| high | 119, 128, 119 | 242, 181, 232 |
+
+A single pair had shown no difference at all, which is why this was repped
+rather than quoted from one run.
+
 ## Reasoning models
 
 Most of what ollama cloud serves streams a separate `reasoning` field alongside
