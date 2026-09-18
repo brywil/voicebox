@@ -178,6 +178,22 @@ Kokoro uses playback rate.
 Note for anyone reading the kokoro-js docs: `list_voices()` only calls
 `console.table()` and returns **undefined**. The data is the `voices` getter.
 
+## The interface
+
+The controls live behind `☰`. There are thirteen of them now — server, model,
+thinking level, input tagging, recogniser, auto-send, speech engine, voice,
+speed, speak-replies, speak-thinking, aside voice, clear — and a single bar of
+them had stopped being scannable and did not fit a narrow window at all.
+
+What stays visible is a crumb line reading `server · model · voice · thinking`,
+because once the selects are hidden there is otherwise no way to tell which
+model just answered you. Esc closes the panel if it is open, and stops the
+speech if it is not.
+
+Rows that do not apply are hidden rather than disabled: the thinking-level row
+only appears when the model has such a control, the aside voice only when
+reading the reasoning aloud is switched on.
+
 ## What gets spoken
 
 Markdown is written to be read, not spoken. Piper says "asterisk asterisk" for

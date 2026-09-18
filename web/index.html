@@ -21,7 +21,43 @@
     display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
     padding: 10px 14px; border-bottom: 1px solid var(--edge); background: var(--panel);
   }
-  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .02em; margin-right: 4px; }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+  #crumb {
+    flex: 1; min-width: 0; font: 12px/1.4 var(--mono); color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #gear { font-size: 17px; line-height: 1; padding: 6px 11px; }
+
+  /* Settings live in a panel because there are now thirteen of them; a single
+     bar of controls had stopped being scannable and did not fit a narrow window
+     at all. */
+  #scrim { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9; }
+  #panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(380px, 92vw); z-index: 10;
+    background: var(--panel); border-left: 1px solid var(--edge);
+    overflow-y: auto; padding-bottom: 24px;
+    box-shadow: -18px 0 40px rgba(0,0,0,.45);
+  }
+  #panel[hidden], #scrim[hidden] { display: none; }
+  .phead {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 16px; border-bottom: 1px solid var(--edge);
+    position: sticky; top: 0; background: var(--panel); font-weight: 600;
+  }
+  #panel section { padding: 14px 16px; border-bottom: 1px solid var(--edge); }
+  #panel h2 {
+    font: 600 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 11px;
+  }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+  .row > span:first-child { flex: 0 0 96px; font-size: 13px; color: var(--muted); }
+  .row select { flex: 1; min-width: 0; }
+  .row .rate { flex: 1; display: flex; align-items: center; gap: 8px; }
+  .row .rate input { flex: 1; }
+  #rateVal { font: 12px var(--mono); min-width: 3.2em; }
+  #panel .chk { margin-bottom: 8px; align-items: flex-start; line-height: 1.35; }
+  #panel .chk input { margin-top: 2px; }
+  #clear { width: 100%; }
   select, button, input {
     background: #1b212c; color: var(--text); border: 1px solid var(--edge);
     border-radius: 7px; padding: 6px 10px; font: inherit; font-size: 13px;
@@ -67,28 +103,11 @@
 
 <header>
   <h1>voicebox</h1>
-  <select id="backend" title="Which server answers"></select>
-  <select id="model" title="Model on that server"></select>
-  <select id="sttEngine" title="How speech is recognised"></select>
-  <select id="ttsEngine" title="How replies are spoken">
-    <option value="piper">voice: Piper (server)</option>
-    <option value="system">voice: system</option>
-    <option value="kokoro">voice: Kokoro (in-browser)</option>
-  </select>
-  <select id="effort" title="How hard the model should think" style="display:none"></select>
-  <select id="voice" title="Speech-out voice"></select>
-  <label class="chk" title="Playback speed">
-    speed <input type="range" id="rate" min="0.5" max="2.5" step="0.05" value="1" style="width:88px" />
-    <span id="rateVal" style="font:12px var(--mono);min-width:2.6em">1.00x</span>
-  </label>
-  <label class="chk"><input type="checkbox" id="speak" checked /> speak replies</label>
-  <label class="chk" title="Read the model's reasoning aloud as a quieter aside">
-    <input type="checkbox" id="speakThink" /> speak thinking</label>
-  <select id="thinkVoice" title="Voice for the inner monologue" style="display:none"></select>
-  <label class="chk"><input type="checkbox" id="autosend" checked /> auto-send on release</label>
-  <label class="chk" title="Tell the model whether each message was spoken or typed">
-    <input type="checkbox" id="tagInput" checked /> tag input mode</label>
-  <button id="clear" title="Clear the conversation">clear</button>
+  <!-- What you are talking to, at a glance. The settings live behind the panel
+       now, so without this there is no way to see which model is answering
+       without opening it. -->
+  <div id="crumb" title="current backend · model · voice"></div>
+  <button id="gear" aria-label="Settings" aria-expanded="false">☰</button>
 </header>
 
 <div id="log"></div>
@@ -98,6 +117,49 @@
   <button id="shush" title="Stop speaking (Esc)" disabled>⏹</button>
   <input id="text" placeholder="…or type here and press Enter" />
 </footer>
+
+<div id="scrim" hidden></div>
+<aside id="panel" hidden aria-label="Settings">
+  <div class="phead"><span>Settings</span><button id="panelClose" aria-label="Close">✕</button></div>
+
+  <section>
+    <h2>Chat</h2>
+    <label class="row"><span>Server</span><select id="backend"></select></label>
+    <label class="row"><span>Model</span><select id="model"></select></label>
+    <label class="row" id="effortRow"><span>Thinking</span><select id="effort"></select></label>
+    <label class="chk"><input type="checkbox" id="tagInput" checked />
+      Tell the model when a message was dictated</label>
+  </section>
+
+  <section>
+    <h2>Speech in</h2>
+    <label class="row"><span>Recogniser</span><select id="sttEngine"></select></label>
+    <label class="chk"><input type="checkbox" id="autosend" checked />
+      Send as soon as I stop talking</label>
+  </section>
+
+  <section>
+    <h2>Speech out</h2>
+    <label class="chk"><input type="checkbox" id="speak" checked /> Speak replies</label>
+    <label class="row"><span>Engine</span><select id="ttsEngine">
+      <option value="piper">Piper (server)</option>
+      <option value="system">system</option>
+      <option value="kokoro">Kokoro (in-browser)</option>
+    </select></label>
+    <label class="row"><span>Voice</span><select id="voice"></select></label>
+    <label class="row"><span>Speed</span>
+      <span class="rate"><input type="range" id="rate" min="0.5" max="2.5" step="0.05" value="1" />
+      <span id="rateVal">1.00x</span></span></label>
+    <label class="chk"><input type="checkbox" id="speakThink" />
+      Read the reasoning aloud, as an aside</label>
+    <label class="row" id="thinkVoiceRow"><span>Aside voice</span><select id="thinkVoice"></select></label>
+  </section>
+
+  <section>
+    <button id="clear">Clear conversation</button>
+  </section>
+</aside>
+
 <div id="status">starting</div>
 
 <script type="module">
@@ -142,6 +204,30 @@ const logEl = $("log"), statusEl = $("status");
 const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
 const sttEngineEl = $("sttEngine"), effortEl = $("effort");
 const thinkVoiceEl = $("thinkVoice"), shushBtn = $("shush");
+
+// --- settings panel ----------------------------------------------------------
+const panel = $("panel"), scrim = $("scrim");
+function setPanel(open) {
+  panel.hidden = !open;
+  scrim.hidden = !open;
+  $("gear").setAttribute("aria-expanded", String(open));
+}
+$("gear").onclick = () => setPanel(panel.hidden);
+$("panelClose").onclick = () => setPanel(false);
+scrim.onclick = () => setPanel(false);
+
+// crumb: the one thing that must stay visible once the controls are hidden --
+// otherwise there is no way to tell which model just answered you.
+function updateCrumb() {
+  const model = (modelEl.value || "").split("/").pop() || "no model";
+  const bits = [backendEl.selectedOptions[0]?.textContent || backendEl.value, model];
+  if ($("speak").checked) {
+    const v = voiceEl.selectedOptions[0]?.textContent || "";
+    if (v) bits.push(v.split("·")[0].trim());
+  }
+  if (effortEl.style.display !== "none" && effortEl.value) bits.push(effortEl.value);
+  $("crumb").textContent = bits.filter(Boolean).join("  ·  ");
+}
 const talkBtn = $("talk"), textEl = $("text");
 
 // Telling the model that a message was dictated helps it read past recogniser
@@ -244,10 +330,12 @@ async function loadModels() {
 backendEl.onchange = async () => {
   localStorage.setItem("vb.backend", backendEl.value);
   await loadModels();
-  loadEffort();
+  await loadEffort();
+  updateCrumb();
 };
 modelEl.onchange = () => {
   localStorage.setItem("vb.model." + backendEl.value, modelEl.value);
+  updateCrumb();
   // Reasoning support is a property of the WEIGHTS, not the server, so it has
   // to be re-asked whenever the model changes.
   loadEffort();
@@ -264,6 +352,7 @@ let effortKnob = { kind: "none" };
 async function loadEffort() {
   effortKnob = { kind: "none" };
   effortEl.style.display = "none";
+  $("effortRow").style.display = "none";
   try {
     const q = new URLSearchParams({ backend: backendEl.value, model: modelEl.value || "" });
     const r = await fetch("/api/effort?" + q);
@@ -288,16 +377,17 @@ async function loadEffort() {
     const saved = localStorage.getItem("vb.effort." + backendEl.value);
     if (saved && effortKnob.levels.includes(saved)) effortEl.value = saved;
     effortEl.style.display = "";
+    $("effortRow").style.display = "";
   } catch { /* no control offered; the dropdown stays hidden */ }
 }
 
-effortEl.onchange = () => localStorage.setItem("vb.effort." + backendEl.value, effortEl.value);
+effortEl.onchange = () => { localStorage.setItem("vb.effort." + backendEl.value, effortEl.value); updateCrumb(); };
 
 // The aside voice is picked from the same list as the main one; defaulting to a
 // DIFFERENT entry is the whole point, so the two are told apart by ear.
 function syncThinkVoices() {
   const on = $("speakThink").checked;
-  thinkVoiceEl.style.display = on ? "" : "none";
+  $("thinkVoiceRow").style.display = on ? "" : "none";
   if (!on) return;
   const opts = [...voiceEl.options].map((o) => ({ v: o.value, t: o.textContent }));
   thinkVoiceEl.innerHTML = "";
@@ -443,7 +533,7 @@ async function loadKokoroVoices() {
 }
 
 speechSynthesis.onvoiceschanged = () => { if (ttsEngineEl.value === "system") loadSystemVoices(); };
-voiceEl.onchange = () => localStorage.setItem("vb.voice." + ttsEngineEl.value, voiceEl.value);
+voiceEl.onchange = () => { localStorage.setItem("vb.voice." + ttsEngineEl.value, voiceEl.value); updateCrumb(); };
 ttsEngineEl.onchange = async () => {
   localStorage.setItem("vb.tts", ttsEngineEl.value);
   stopSpeaking();
@@ -476,6 +566,7 @@ async function loadPiperVoices() {
     const saved = localStorage.getItem("vb.voice.piper");
     if (saved && piperVoices.some((v) => v.id === saved)) voiceEl.value = saved;
     syncThinkVoices();
+    updateCrumb();
     status(`Piper ready — ${piperVoices.length} voices, on the server`);
   } catch (e) {
     voiceEl.innerHTML = `<option value="">(unavailable)</option>`;
@@ -533,7 +624,9 @@ shushBtn.onclick = () => { stopSpeaking(); status("speech stopped"); };
 // Esc anywhere, because reaching for a button while something is talking at you
 // is exactly the moment you do not want to be aiming a mouse.
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { stopSpeaking(); status("speech stopped"); }
+  if (e.key !== "Escape") return;
+  if (!panel.hidden) { setPanel(false); return; }   // panel first, then speech
+  stopSpeaking(); status("speech stopped");
 });
 
 // Sentences are spoken in order. Kokoro generation is async and a later
@@ -970,7 +1063,11 @@ talkBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRec(); });
 textEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && textEl.value.trim()) { const v = textEl.value; textEl.value = ""; send(v, "typed"); }
 });
-$("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis.cancel(); status("cleared"); };
+$("clear").onclick = () => {
+  history = []; logEl.innerHTML = ""; stopSpeaking(); setPanel(false); status("cleared");
+};
+$("speak").onchange = updateCrumb;
+ttsEngineEl.addEventListener("change", updateCrumb);
 
 // --- boot -------------------------------------------------------------------
 (async () => {
@@ -994,6 +1091,7 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
 
   if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
   syncThinkVoices();
+  updateCrumb();
   status(`ready [build ${BUILD}] — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);
  } catch (e) {
   // Never leave the status bar reading "starting" forever. A boot that dies
