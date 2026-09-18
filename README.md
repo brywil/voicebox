@@ -90,21 +90,33 @@ putting a 4B multimodal model in the browser.
 
 ## Voice vs typed
 
-Each message tells the model how it was entered — `[voice]` or `[typed]` — behind
-a system preamble explaining the difference. A transcript may carry homophones,
-dropped punctuation and mangled proper nouns that are artefacts of the recogniser
-rather than things you meant; typed text means exactly what it says, which
-matters most for code, paths and flags.
+Dictated messages are prefixed `[voice]`, behind a one-line system note. It
+helps the model read past recogniser artefacts: homophones, mangled proper nouns,
+missing punctuation.
 
-The tag goes to the model, never to the screen: you know how you entered it, and
-echoing the marker back is noise. Toggle it off and the tags are stripped from
-history on the way out, so it takes effect immediately rather than only for new
-conversations.
+Measured working on a capable model — `[voice] whats the capital of sweeden` and
+glm-5.3-flash's own reasoning read "the voice transcription shows 'sweeden' which
+is a misspelling ... a typical speech-to-text artifact", then answered plainly.
 
-Measured working — asked `[voice] whats the capital of sweeden`, the model's own
-reasoning read "the voice transcription shows 'sweeden' which is a misspelling
-... a typical speech-to-text artifact", answered plainly, and never mentioned the
-tag.
+**Only voice is tagged, and the note is terse, because the obvious richer version
+measurably broke a small model.** Tagging `[typed]` as well and explaining both
+cases made granite-3.1-1b echo the marker into its own replies ("[typed] As of
+2023...") and, once it commented on a message's phrasing, keep doing so for the
+rest of the conversation — escalating to suggesting rephrasings instead of
+answering. Absence of a tag carries "typed" perfectly well, and a weak model has
+less to imitate. The lean version also recovered from a history already poisoned
+with that behaviour, where the verbose one did not.
+
+An echoed marker is stripped from replies anyway, and the tag never appears on
+screen — you know how you entered it.
+
+## A note on model size
+
+If answers are confidently wrong, check which backend is selected before
+suspecting the plumbing. granite-3.1-1b-a400m is a nano model with 400M active
+parameters; asked for the bicycle land speed record it named, across runs, four
+different people who never held it. That is the model, not the prompt and not
+the transcription.
 
 ## Speech engines
 

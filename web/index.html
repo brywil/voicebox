@@ -135,20 +135,23 @@ const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
 const sttEngineEl = $("sttEngine");
 const talkBtn = $("talk"), textEl = $("text");
 
-// Speech recognition and a keyboard produce quite different text, and the model
-// cannot tell them apart without being told. A transcript may carry homophones,
-// dropped punctuation and mangled proper nouns that are artefacts of the
-// recogniser rather than things the user meant; typed text means exactly what it
-// says. Saying which is which lets the model read a transcript charitably
-// without second-guessing text that was typed deliberately.
+// Telling the model that a message was dictated helps it read past recogniser
+// artefacts -- homophones, mangled proper nouns, missing punctuation.
+//
+// Only VOICE is tagged, and the note is deliberately terse. A longer version
+// that also tagged [typed] and explained both cases made a small model (granite
+// 1b) misbehave in two measured ways: it echoed the marker into its own replies
+// ("[typed] As of 2023..."), and once it commented on the phrasing of a message
+// it kept doing so for the rest of the conversation, escalating to suggesting
+// rephrasings instead of answering. Absence of a tag carries "typed" perfectly
+// well, and saying less gives a weak model less to imitate.
 const INPUT_MODE_PREAMBLE =
-  "The user's messages are prefixed with how they were entered. " +
-  "[voice] means the text came from speech recognition: it may contain " +
-  "transcription errors, homophones, run-on phrasing or missing punctuation. " +
-  "Read it for intent and do not treat odd wording as deliberate. " +
-  "[typed] means the user typed it exactly as written, so treat the wording, " +
-  "spelling and punctuation as intentional — especially code, paths and flags. " +
-  "Never mention these tags or repeat them back.";
+  "A message beginning with [voice] was dictated by speech recognition and may " +
+  "contain misheard words. Answer it normally. Never write [voice] yourself and " +
+  "never remark on how the message was entered or worded.";
+
+// A small model may still echo the marker. Strip it rather than show it.
+const stripTag = (t) => t.replace(/^\s*\[(voice|typed)\]\s*/i, "");
 
 let transcriber = null;
 // Probed once and shared. Both models want the same answer, and requesting an
@@ -427,7 +430,7 @@ function speakStreaming(delta, flush = false) {
 async function send(userText, source = "typed") {
   if (busy || !userText.trim()) return;
   busy = true; talkBtn.disabled = true;
-  const tag = $("tagInput").checked ? `[${source}] ` : "";
+  const tag = ($("tagInput").checked && source === "voice") ? "[voice] " : "";
   // The tag goes to the model, not to the transcript on screen: the user knows
   // how they entered it, and echoing the marker back just adds noise.
   addMsg(source === "voice" ? "you 🎤" : "you", userText);
@@ -447,9 +450,9 @@ async function send(userText, source = "typed") {
       // checkbox takes effect immediately instead of only for new conversations.
       body: JSON.stringify({
         model: modelEl.value, stream: true,
-        messages: $("tagInput").checked
+        messages: ($("tagInput").checked && history.some((m) => m.content.startsWith("[voice] ")))
           ? [{ role: "system", content: INPUT_MODE_PREAMBLE }, ...history]
-          : history.map((m) => ({ ...m, content: m.content.replace(/^\[(voice|typed)\] /, "") })),
+          : history.map((m) => ({ ...m, content: stripTag(m.content) })),
       }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -487,6 +490,7 @@ async function send(userText, source = "typed") {
             const d = delta.content;
             if (d) {
               full += d;
+              if (full.length < 40) full = stripTag(full);   // only ever a prefix
               out.textContent = full;
               out.className = "body";
               if (thinkEl) thinkEl.querySelector("summary").textContent =
