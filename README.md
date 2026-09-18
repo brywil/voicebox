@@ -88,6 +88,50 @@ Verified isolated with the CDN still importing (`crossOriginIsolated=true`,
 At this size the CPU fallback is genuinely fine — that is the whole point of not
 putting a 4B multimodal model in the browser.
 
+## Voice vs typed
+
+Each message tells the model how it was entered — `[voice]` or `[typed]` — behind
+a system preamble explaining the difference. A transcript may carry homophones,
+dropped punctuation and mangled proper nouns that are artefacts of the recogniser
+rather than things you meant; typed text means exactly what it says, which
+matters most for code, paths and flags.
+
+The tag goes to the model, never to the screen: you know how you entered it, and
+echoing the marker back is noise. Toggle it off and the tags are stripped from
+history on the way out, so it takes effect immediately rather than only for new
+conversations.
+
+Measured working — asked `[voice] whats the capital of sweeden`, the model's own
+reasoning read "the voice transcription shows 'sweeden' which is a misspelling
+... a typical speech-to-text artifact", answered plainly, and never mentioned the
+tag.
+
+## Speech engines
+
+| engine | where the audio goes | download |
+|---|---|---|
+| Chrome, on-device | nowhere — stays on the machine | Chrome's language pack |
+| Chrome, cloud | Google | none |
+| Whisper tiny/base/small | nowhere | 40 / 80 / 250 MB |
+
+Chrome's recogniser is the same Google speech stack behind Gboard's voice typing;
+[Chrome 139 added an on-device mode](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition/available_static)
+so audio need not leave the machine. The engine dropdown says which mode is
+actually active, because that difference decides where your voice goes.
+
+## Voices and speed
+
+`voice: system` uses whatever the OS offers — on this box Chrome's own Google
+voices, not just espeak. `voice: Kokoro` loads an 86 MB ONNX model with 55
+voices (~520 KB each, only the selected one fetched), sorted by Kokoro's own
+A–F grade so the good ones are at the top.
+
+Speed is 0.5x–2.5x. It applies live to Kokoro playback and per-utterance to the
+system voice, which can only take a rate as an utterance starts.
+
+Note for anyone reading the kokoro-js docs: `list_voices()` only calls
+`console.table()` and returns **undefined**. The data is the `voices` getter.
+
 ## Reasoning models
 
 Most of what ollama cloud serves streams a separate `reasoning` field alongside

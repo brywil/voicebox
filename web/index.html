@@ -79,6 +79,8 @@
   </label>
   <label class="chk"><input type="checkbox" id="speak" checked /> speak replies</label>
   <label class="chk"><input type="checkbox" id="autosend" checked /> auto-send on release</label>
+  <label class="chk" title="Tell the model whether each message was spoken or typed">
+    <input type="checkbox" id="tagInput" checked /> tag input mode</label>
   <button id="clear" title="Clear the conversation">clear</button>
 </header>
 
@@ -132,6 +134,21 @@ const logEl = $("log"), statusEl = $("status");
 const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
 const sttEngineEl = $("sttEngine");
 const talkBtn = $("talk"), textEl = $("text");
+
+// Speech recognition and a keyboard produce quite different text, and the model
+// cannot tell them apart without being told. A transcript may carry homophones,
+// dropped punctuation and mangled proper nouns that are artefacts of the
+// recogniser rather than things the user meant; typed text means exactly what it
+// says. Saying which is which lets the model read a transcript charitably
+// without second-guessing text that was typed deliberately.
+const INPUT_MODE_PREAMBLE =
+  "The user's messages are prefixed with how they were entered. " +
+  "[voice] means the text came from speech recognition: it may contain " +
+  "transcription errors, homophones, run-on phrasing or missing punctuation. " +
+  "Read it for intent and do not treat odd wording as deliberate. " +
+  "[typed] means the user typed it exactly as written, so treat the wording, " +
+  "spelling and punctuation as intentional — especially code, paths and flags. " +
+  "Never mention these tags or repeat them back.";
 
 let transcriber = null;
 let media = null, recorder = null, chunks = [];
@@ -246,8 +263,11 @@ async function ensureKokoro() {
           status(`Kokoro ${(100 * p.loaded / p.total).toFixed(0)}% (${p.file})`);
       },
     });
-    kokoroVoices = kokoro.list_voices();
-    status("Kokoro ready — " + kokoroVoices.length + " voices");
+    // NOT list_voices(): that method only does console.table() and returns
+    // undefined. The voices getter is the actual data, keyed by voice id, with
+    // {name, language, gender, overallGrade} per entry.
+    kokoroVoices = kokoro.voices || {};
+    status("Kokoro ready — " + Object.keys(kokoroVoices).length + " voices");
     return kokoro;
   })();
   return kokoroLoading;
@@ -257,16 +277,30 @@ async function loadKokoroVoices() {
   voiceEl.innerHTML = `<option>loading…</option>`;
   try {
     await ensureKokoro();
+    const ids = Object.keys(kokoroVoices);
+    if (!ids.length) throw new Error("model loaded but exposed no voices");
+
+    // Kokoro grades its own voices A..F and most of them are middling. Sorting
+    // by grade puts the ones actually worth listening to at the top, rather
+    // than making you audition 55 alphabetically.
+    const grade = (id) => {
+      const g = kokoroVoices[id].overallGrade || "F";
+      return "ABCDEF".indexOf(g[0]) * 3 - (g.includes("+") ? 1 : 0);
+    };
+    ids.sort((a, b) => grade(a) - grade(b) || a.localeCompare(b));
+
     voiceEl.innerHTML = "";
-    for (const name of kokoroVoices) {
+    for (const id of ids) {
+      const v = kokoroVoices[id];
       const o = document.createElement("option");
-      o.value = name;
-      o.textContent = name;
+      o.value = id;
+      o.textContent = `${v.name} · ${v.gender?.[0] || "?"} · ${v.language} · ${v.overallGrade}`;
+      o.title = id;
       voiceEl.appendChild(o);
     }
     const saved = localStorage.getItem("vb.voice.kokoro");
-    if (saved && kokoroVoices.includes(saved)) voiceEl.value = saved;
-    else if (kokoroVoices.includes("af_heart")) voiceEl.value = "af_heart";
+    if (saved && ids.includes(saved)) voiceEl.value = saved;
+    else if (ids.includes("af_heart")) voiceEl.value = "af_heart";
   } catch (e) {
     voiceEl.innerHTML = `<option value="">(Kokoro failed)</option>`;
     status("Kokoro unavailable: " + e.message, "err");
@@ -355,11 +389,14 @@ function speakStreaming(delta, flush = false) {
 }
 
 // --- the turn ---------------------------------------------------------------
-async function send(userText) {
+async function send(userText, source = "typed") {
   if (busy || !userText.trim()) return;
   busy = true; talkBtn.disabled = true;
-  addMsg("you", userText);
-  history.push({ role: "user", content: userText });
+  const tag = $("tagInput").checked ? `[${source}] ` : "";
+  // The tag goes to the model, not to the transcript on screen: the user knows
+  // how they entered it, and echoing the marker back just adds noise.
+  addMsg(source === "voice" ? "you 🎤" : "you", userText);
+  history.push({ role: "user", content: tag + userText });
 
   const out = addMsg("bot", "", "partial");
   // Reasoning models (most of what ollama cloud serves) stream a separate
@@ -371,7 +408,14 @@ async function send(userText) {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Voicebox-Backend": backendEl.value },
-      body: JSON.stringify({ model: modelEl.value, stream: true, messages: history }),
+      // Built per request rather than stored in history, so toggling the
+      // checkbox takes effect immediately instead of only for new conversations.
+      body: JSON.stringify({
+        model: modelEl.value, stream: true,
+        messages: $("tagInput").checked
+          ? [{ role: "system", content: INPUT_MODE_PREAMBLE }, ...history]
+          : history.map((m) => ({ ...m, content: m.content.replace(/^\[(voice|typed)\] /, "") })),
+      }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
 
@@ -582,7 +626,7 @@ async function stopRec() {
       webSpeechPromise = null;
       if (!text) { status("heard nothing"); return; }
       status("transcribed");
-      if ($("autosend").checked) send(text);
+      if ($("autosend").checked) send(text, "voice");
       else { textEl.value = text; status("transcribed — press Enter to send"); }
     } catch (e) {
       webSpeechPromise = null;
@@ -626,7 +670,7 @@ async function stopRec() {
     const text = (out.text || "").trim();
     if (!text) { status(`heard nothing (${secs}s)`); return; }
     status(`transcribed in ${secs}s`);
-    if ($("autosend").checked) send(text);
+    if ($("autosend").checked) send(text, "voice");
     else { textEl.value = text; status(`transcribed in ${secs}s — press Enter to send`); }
   } catch (e) {
     console.error("[voicebox] transcription failed:", e);
@@ -644,7 +688,7 @@ talkBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRec(); 
 talkBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRec(); });
 
 textEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && textEl.value.trim()) { const v = textEl.value; textEl.value = ""; send(v); }
+  if (e.key === "Enter" && textEl.value.trim()) { const v = textEl.value; textEl.value = ""; send(v, "typed"); }
 });
 $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis.cancel(); status("cleared"); };
 
@@ -654,6 +698,8 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
   await loadBackends();
   const haveMic = await initMic();
 
+  $("tagInput").checked = localStorage.getItem("vb.tag") !== "0";
+  $("tagInput").onchange = () => localStorage.setItem("vb.tag", $("tagInput").checked ? "1" : "0");
   ttsEngineEl.value = localStorage.getItem("vb.tts") || "system";
   if (ttsEngineEl.value === "kokoro") loadKokoroVoices(); else loadSystemVoices();
 
