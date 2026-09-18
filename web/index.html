@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>voicebox</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0f13; --panel: #151922; --edge: #262c38;
+    --text: #e6e9ef; --muted: #8b93a3; --accent: #57c7a8; --accent-dim: #2f6e5e;
+    --rec: #e05555; --warn: #e0a955;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); height: 100dvh; display: flex; flex-direction: column;
+    font: 15px/1.55 system-ui, -apple-system, sans-serif;
+  }
+  header {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; border-bottom: 1px solid var(--edge); background: var(--panel);
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .02em; margin-right: 4px; }
+  select, button, input {
+    background: #1b212c; color: var(--text); border: 1px solid var(--edge);
+    border-radius: 7px; padding: 6px 10px; font: inherit; font-size: 13px;
+  }
+  select:hover, button:hover { border-color: #3a4356; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  label.chk { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--muted); }
+  #log { flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 780px; width: 100%; margin: 0 auto; display: flex; gap: 10px; }
+  .who {
+    flex: 0 0 52px; font: 600 11px/1.8 var(--mono); letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); padding-top: 2px;
+  }
+  .msg.you .who { color: var(--accent); }
+  .body { flex: 1; white-space: pre-wrap; word-wrap: break-word; }
+  .body.partial { color: var(--muted); font-style: italic; }
+  .think {
+    border-left: 2px solid var(--edge); padding: 4px 0 4px 10px; margin-bottom: 8px;
+    color: var(--muted); font-size: 13px; white-space: pre-wrap; max-height: 8.5em; overflow-y: auto;
+  }
+  .think summary { cursor: pointer; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  footer {
+    border-top: 1px solid var(--edge); background: var(--panel);
+    padding: 12px 14px; display: flex; gap: 10px; align-items: center;
+  }
+  #talk {
+    flex: 0 0 auto; padding: 12px 26px; font-size: 15px; font-weight: 600;
+    border-color: var(--accent-dim); background: #18241f;
+  }
+  #talk.rec { background: var(--rec); border-color: var(--rec); color: #fff; }
+  #text { flex: 1; }
+  #status { font: 12px/1.4 var(--mono); color: var(--muted); padding: 6px 16px; border-top: 1px solid var(--edge); }
+  #status.err { color: var(--rec); }
+  #status.warn { color: var(--warn); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>voicebox</h1>
+  <select id="backend" title="Which server answers"></select>
+  <select id="model" title="Model on that server"></select>
+  <select id="voice" title="Speech-out voice"></select>
+  <label class="chk"><input type="checkbox" id="speak" checked /> speak replies</label>
+  <label class="chk"><input type="checkbox" id="autosend" checked /> auto-send on release</label>
+  <button id="clear" title="Clear the conversation">clear</button>
+</header>
+
+<div id="log"></div>
+
+<footer>
+  <button id="talk" disabled>loading…</button>
+  <input id="text" placeholder="…or type here and press Enter" />
+</footer>
+<div id="status">starting</div>
+
+<script type="module">
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4";
+
+// ---------------------------------------------------------------------------
+// Speech in. A small dedicated recogniser, not a multimodal LLM: whisper-tiny
+// is ~40 MB where Gemma's audio path drags the whole 3.4 GB model in with it.
+// Runs on WebGPU when the adapter allows and falls back to WASM, which is
+// perfectly usable at this size.
+// ---------------------------------------------------------------------------
+const STT_MODEL = "onnx-community/whisper-tiny.en";
+
+const $ = (id) => document.getElementById(id);
+const logEl = $("log"), statusEl = $("status");
+const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
+const talkBtn = $("talk"), textEl = $("text");
+
+let transcriber = null;
+let media = null, recorder = null, chunks = [];
+let history = [];
+let busy = false;
+
+function status(msg, kind = "") { statusEl.textContent = msg; statusEl.className = kind; }
+
+function addMsg(who, text, cls = "") {
+  const row = document.createElement("div");
+  row.className = "msg " + (who === "you" ? "you" : "");
+  row.innerHTML = `<div class="who">${who}</div><div class="body ${cls}"></div>`;
+  row.querySelector(".body").textContent = text;
+  logEl.appendChild(row);
+  logEl.scrollTop = logEl.scrollHeight;
+  return row.querySelector(".body");
+}
+
+// --- backends ---------------------------------------------------------------
+async function loadBackends() {
+  const r = await fetch("/api/backends");
+  const d = await r.json();
+  backendEl.innerHTML = "";
+  for (const b of d.backends) {
+    const o = document.createElement("option");
+    o.value = b.id;
+    o.textContent = b.label + (b.needs_key && !b.has_key ? "  (no key)" : "");
+    o.disabled = b.needs_key && !b.has_key;
+    backendEl.appendChild(o);
+  }
+  backendEl.value = localStorage.getItem("vb.backend") || d.default;
+  await loadModels();
+}
+
+async function loadModels() {
+  modelEl.innerHTML = `<option>loading…</option>`;
+  try {
+    const r = await fetch("/v1/models", { headers: { "X-Voicebox-Backend": backendEl.value } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    const ids = (d.data || d.models || []).map((m) => m.id || m.name || m.model).filter(Boolean);
+    modelEl.innerHTML = "";
+    for (const id of ids.sort()) {
+      const o = document.createElement("option");
+      o.value = id;
+      // A gguf path is unreadable in a dropdown; the filename is the identity.
+      o.textContent = id.split("/").pop();
+      o.title = id;
+      modelEl.appendChild(o);
+    }
+    const saved = localStorage.getItem("vb.model." + backendEl.value);
+    if (saved && ids.includes(saved)) modelEl.value = saved;
+    if (!ids.length) modelEl.innerHTML = `<option value="">(server listed none)</option>`;
+  } catch (e) {
+    modelEl.innerHTML = `<option value="">(unreachable)</option>`;
+    status(`${backendEl.value}: ${e.message}`, "err");
+  }
+}
+
+backendEl.onchange = () => { localStorage.setItem("vb.backend", backendEl.value); loadModels(); };
+modelEl.onchange = () => localStorage.setItem("vb.model." + backendEl.value, modelEl.value);
+
+// --- speech out -------------------------------------------------------------
+// The built-in synthesiser: no download at all, offline, and good enough. A
+// neural TTS would cost another ~260 MB for a nicer voice.
+function loadVoices() {
+  const vs = speechSynthesis.getVoices();
+  if (!vs.length) return;
+  voiceEl.innerHTML = "";
+  for (const v of vs) {
+    const o = document.createElement("option");
+    o.value = v.name; o.textContent = `${v.name} (${v.lang})`;
+    voiceEl.appendChild(o);
+  }
+  const saved = localStorage.getItem("vb.voice");
+  if (saved && vs.some((v) => v.name === saved)) voiceEl.value = saved;
+}
+speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+voiceEl.onchange = () => localStorage.setItem("vb.voice", voiceEl.value);
+
+let speakQueue = "";
+function speak(text) {
+  if (!$("speak").checked || !text.trim()) return;
+  const u = new SpeechSynthesisUtterance(text);
+  const v = speechSynthesis.getVoices().find((x) => x.name === voiceEl.value);
+  if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+// Speak sentence by sentence as the stream arrives, so the reply starts being
+// read aloud while it is still being generated.
+function speakStreaming(delta, flush = false) {
+  speakQueue += delta;
+  let m;
+  while ((m = speakQueue.match(/^[\s\S]*?[.!?…](\s|$)/))) {
+    speak(m[0]); speakQueue = speakQueue.slice(m[0].length);
+  }
+  if (flush && speakQueue.trim()) { speak(speakQueue); speakQueue = ""; }
+}
+
+// --- the turn ---------------------------------------------------------------
+async function send(userText) {
+  if (busy || !userText.trim()) return;
+  busy = true; talkBtn.disabled = true;
+  addMsg("you", userText);
+  history.push({ role: "user", content: userText });
+
+  const out = addMsg("bot", "", "partial");
+  // Reasoning models (most of what ollama cloud serves) stream a separate
+  // `reasoning` field. It is shown, collapsed, but NEVER spoken -- listening to
+  // a model deliberate for thirty seconds before it answers is unusable.
+  let thinkEl = null;
+  let full = "", thinking = "";
+  try {
+    const r = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Voicebox-Backend": backendEl.value },
+      body: JSON.stringify({ model: modelEl.value, stream: true, messages: history }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      // SSE frames are separated by a blank line; a chunk can split one.
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const j = JSON.parse(payload);
+            const delta = j.choices?.[0]?.delta || {};
+            const think = delta.reasoning ?? delta.reasoning_content;
+            if (think) {
+              thinking += think;
+              if (!thinkEl) {
+                thinkEl = document.createElement("details");
+                thinkEl.className = "think";
+                thinkEl.innerHTML = "<summary>thinking…</summary><div></div>";
+                out.parentNode.insertBefore(thinkEl, out);
+              }
+              thinkEl.querySelector("div").textContent = thinking;
+              logEl.scrollTop = logEl.scrollHeight;
+            }
+            const d = delta.content;
+            if (d) {
+              full += d;
+              out.textContent = full;
+              out.className = "body";
+              if (thinkEl) thinkEl.querySelector("summary").textContent =
+                `thought for ${thinking.length} chars`;
+              logEl.scrollTop = logEl.scrollHeight;
+              speakStreaming(d);   // content only -- reasoning is never spoken
+            }
+          } catch { /* a partial frame; the next chunk completes it */ }
+        }
+      }
+    }
+    speakStreaming("", true);
+    history.push({ role: "assistant", content: full });
+    status(thinking
+      ? `ok — ${full.length} chars (+${thinking.length} thinking, not spoken)`
+      : `ok — ${full.length} chars`);
+  } catch (e) {
+    out.textContent = "⚠ " + e.message;
+    out.className = "body";
+    status(e.message, "err");
+    history.pop();
+  } finally {
+    busy = false; talkBtn.disabled = false;
+  }
+}
+
+// --- microphone -------------------------------------------------------------
+async function initMic() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    status("no microphone API — this origin is not a secure context. Use http://localhost, or see README.", "err");
+    talkBtn.textContent = "no mic";
+    return false;
+  }
+  try {
+    media = await navigator.mediaDevices.getUserMedia({ audio: true });
+    return true;
+  } catch (e) {
+    status("microphone blocked: " + e.message, "err");
+    talkBtn.textContent = "no mic";
+    return false;
+  }
+}
+
+async function startRec() {
+  if (!media || busy) return;
+  chunks = [];
+  recorder = new MediaRecorder(media);
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.start();
+  talkBtn.classList.add("rec");
+  talkBtn.textContent = "release to send";
+  status("listening…");
+}
+
+async function stopRec() {
+  if (!recorder || recorder.state === "inactive") return;
+  const done = new Promise((res) => (recorder.onstop = res));
+  recorder.stop();
+  await done;
+  talkBtn.classList.remove("rec");
+  talkBtn.textContent = "hold to talk";
+  status("transcribing…");
+
+  const blob = new Blob(chunks, { type: recorder.mimeType });
+  const buf = await blob.arrayBuffer();
+  // Whisper wants 16 kHz mono float32.
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  const audio = await ctx.decodeAudioData(buf);
+  const pcm = audio.getChannelData(0);
+  await ctx.close();
+
+  const out = await transcriber(pcm);
+  const text = (out.text || "").trim();
+  if (!text) { status("heard nothing"); return; }
+  if ($("autosend").checked) send(text);
+  else { textEl.value = text; status("transcribed — press Enter to send"); }
+}
+
+talkBtn.addEventListener("mousedown", startRec);
+talkBtn.addEventListener("mouseup", stopRec);
+talkBtn.addEventListener("mouseleave", () => recorder?.state === "recording" && stopRec());
+talkBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRec(); });
+talkBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRec(); });
+
+textEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && textEl.value.trim()) { const v = textEl.value; textEl.value = ""; send(v); }
+});
+$("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis.cancel(); status("cleared"); };
+
+// --- boot -------------------------------------------------------------------
+(async () => {
+  await loadBackends();
+  const haveMic = await initMic();
+
+  status("loading speech recogniser (~40 MB, cached after the first run)…");
+  let device = "webgpu";
+  if (!navigator.gpu) device = "wasm";
+  try {
+    transcriber = await pipeline("automatic-speech-recognition", STT_MODEL, {
+      device, dtype: "q8",
+      progress_callback: (p) => {
+        if (p.status === "progress" && p.total)
+          status(`speech recogniser ${(100 * p.loaded / p.total).toFixed(0)}% (${p.file})`);
+      },
+    });
+  } catch (e) {
+    // Same fallback the Gemma space uses, but here it is cheap: whisper-tiny on
+    // CPU is fine, where a 4B model on CPU is not.
+    status("WebGPU unavailable for STT, using CPU: " + e.message, "warn");
+    transcriber = await pipeline("automatic-speech-recognition", STT_MODEL, { device: "wasm", dtype: "q8" });
+    device = "wasm";
+  }
+
+  if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
+  status(`ready — speech on ${device}, chat via ${backendEl.value}`);
+})();
+</script>
+</body>
+</html>

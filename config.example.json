@@ -1,0 +1,27 @@
+{
+  "listen": ":8080",
+  "default": "xeon-llama",
+  "backends": [
+    {
+      "id": "xeon-llama",
+      "label": "Xeon llama-server",
+      "url": "http://127.0.0.1:8085"
+    },
+    {
+      "id": "xeon-ollama",
+      "label": "Xeon ollama (local)",
+      "url": "http://127.0.0.1:11434"
+    },
+    {
+      "id": "spark",
+      "label": "Spark llama-server",
+      "url": "http://<other-host>:8080"
+    },
+    {
+      "id": "ollama-cloud",
+      "label": "Ollama Cloud",
+      "url": "https://ollama.com",
+      "api_key_env": "OLLAMA_API_KEY"
+    }
+  ]
+}
