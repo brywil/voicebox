@@ -893,6 +893,9 @@ function recogniseWebSpeech() {
     r.continuous = false;
     if ("processLocally" in r) r.processLocally = webSpeechLocal;
     let finalText = "";
+    r.onstart = () => status("listening… (speak now)");
+    r.onaudiostart = () => console.log("[voicebox] audio capture started");
+    r.onspeechstart = () => status("listening… (hearing you)");
     r.onresult = (e) => {
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -902,8 +905,23 @@ function recogniseWebSpeech() {
       }
       status("listening… " + (finalText + interim).slice(-60));
     };
-    r.onerror = (e) => reject(new Error(e.error === "not-allowed"
-      ? "microphone permission denied" : "speech error: " + e.error));
+    r.onerror = (e) => {
+      // These are not interchangeable and the difference is the whole diagnosis:
+      // no-speech means the recogniser ran and heard nothing (a mic that is
+      // muted, or routed elsewhere); not-allowed is permission; network means
+      // the cloud recogniser could not be reached, which on a tailnet-only
+      // device is a real possibility.
+      const why = {
+        "no-speech": "heard nothing — is the mic muted, or picked up by another app?",
+        "not-allowed": "microphone permission denied",
+        "service-not-allowed": "the browser refused the speech service",
+        "audio-capture": "no microphone available",
+        "network": "speech service unreachable (needs internet for the cloud recogniser)",
+        "aborted": "cancelled",
+      }[e.error] || ("speech error: " + e.error);
+      console.warn("[voicebox] SpeechRecognition error:", e.error, e);
+      reject(new Error(why));
+    };
     r.onend = () => resolve(finalText.trim());
     activeRecognition = r;
     r.start();
@@ -969,7 +987,7 @@ async function startRec() {
 
   if (sttEngine() === "webspeech") {
     talkBtn.classList.add("rec");
-    talkBtn.textContent = "release to send";
+    talkBtn.textContent = TOUCH ? "tap when done" : "release to send";
     status("listening…");
     webSpeechPromise = recogniseWebSpeech();
     return;
@@ -981,7 +999,7 @@ async function startRec() {
   recorder.ondataavailable = (e) => chunks.push(e.data);
   recorder.start();
   talkBtn.classList.add("rec");
-  talkBtn.textContent = "release to send";
+  talkBtn.textContent = TOUCH ? "tap when done" : "release to send";
   status("listening…");
 }
 
@@ -990,7 +1008,7 @@ let webSpeechPromise = null;
 async function stopRec() {
   if (sttEngine() === "webspeech") {
     talkBtn.classList.remove("rec");
-    talkBtn.textContent = "hold to talk";
+    talkBtn.textContent = TOUCH ? "tap to talk" : "hold to talk";
     if (!webSpeechPromise) return;
     status("finishing…");
     try { activeRecognition?.stop(); } catch { /* already stopping */ }
@@ -1013,7 +1031,7 @@ async function stopRec() {
   recorder.stop();
   await done;
   talkBtn.classList.remove("rec");
-  talkBtn.textContent = "hold to talk";
+  talkBtn.textContent = TOUCH ? "tap to talk" : "hold to talk";
   status("transcribing…");
 
   talkBtn.disabled = true;
@@ -1035,7 +1053,13 @@ async function stopRec() {
     try { audio = await ctx.decodeAudioData(buf); }
     finally { await ctx.close(); }
     const pcm = audio.getChannelData(0);
-    if (pcm.length < 1600) throw new Error(`only ${(pcm.length / 16000).toFixed(2)}s of audio`);
+    if (pcm.length < 1600) throw new Error(`only ${(pcm.length / 16000).toFixed(2)}s of audio — hold or tap for longer`);
+    // A silent take is a muted or misrouted mic, not a transcription failure,
+    // and the two need different fixes. Peak amplitude tells them apart.
+    let peak = 0;
+    for (let i = 0; i < pcm.length; i++) { const a = Math.abs(pcm[i]); if (a > peak) peak = a; }
+    console.log(`[voicebox] captured ${(pcm.length / 16000).toFixed(2)}s, peak ${peak.toFixed(4)}`);
+    if (peak < 0.005) throw new Error(`mic captured ${(pcm.length / 16000).toFixed(1)}s of near-silence (peak ${peak.toFixed(4)}) — muted or another app has it?`);
 
     await ensureWhisper();
     const out = await transcriber(pcm);
@@ -1054,11 +1078,34 @@ async function stopRec() {
   }
 }
 
-talkBtn.addEventListener("mousedown", startRec);
-talkBtn.addEventListener("mouseup", stopRec);
-talkBtn.addEventListener("mouseleave", () => recorder?.state === "recording" && stopRec());
-talkBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRec(); });
-talkBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRec(); });
+// Press-and-hold works with a mouse and is wrong on a phone: a finger that
+// drifts off the button cancels the take, and the synthesised mouse events that
+// follow a touch re-trigger the handlers. So a coarse pointer gets TAP TO START,
+// TAP TO STOP instead, which is also what every phone dictation UI does.
+const TOUCH = window.matchMedia("(pointer: coarse)").matches;
+let recording = false;
+
+async function beginRec() {
+  if (recording || busy) return;
+  recording = true;
+  await startRec();
+}
+async function endRec() {
+  if (!recording) return;
+  recording = false;
+  await stopRec();
+}
+
+if (TOUCH) {
+  talkBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    recording ? endRec() : beginRec();
+  });
+} else {
+  talkBtn.addEventListener("mousedown", beginRec);
+  talkBtn.addEventListener("mouseup", endRec);
+  talkBtn.addEventListener("mouseleave", () => { if (recording) endRec(); });
+}
 
 textEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && textEl.value.trim()) { const v = textEl.value; textEl.value = ""; send(v, "typed"); }
@@ -1089,7 +1136,7 @@ ttsEngineEl.addEventListener("change", updateCrumb);
   await loadSttEngines();
   if (sttEngine() !== "webspeech") { STT_MODEL = WHISPER[sttEngine()].id; await ensureWhisper(); }
 
-  if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = "hold to talk"; }
+  if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = TOUCH ? "tap to talk" : "hold to talk"; }
   syncThinkVoices();
   updateCrumb();
   status(`ready [build ${BUILD}] — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);
