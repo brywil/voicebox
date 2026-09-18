@@ -42,6 +42,15 @@ type Backend struct {
 	proxy  *httputil.ReverseProxy
 }
 
+// voicebox is the server: configuration, the tool client, and the HTTP client
+// used for the agentic loop's own upstream calls (the reverse proxies handle
+// the pass-through path).
+type voicebox struct {
+	cfg      *Config
+	mcp      *MCPClient
+	upstream *http.Client
+}
+
 type Config struct {
 	Listen   string     `json:"listen"`
 	Default  string     `json:"default"`
@@ -49,6 +58,9 @@ type Config struct {
 	// TTSURL is the local Piper service (tts_server.py). Proxied through this
 	// origin like everything else, so the page needs no second host and no CORS.
 	TTSURL string `json:"tts_url"`
+	// MCP, when set, enables tool calling. Empty means the proxy behaves exactly
+	// as it did before: no tools, no request parsing.
+	MCP MCPConfig `json:"mcp"`
 
 	ttsProxy *httputil.ReverseProxy
 }
@@ -67,6 +79,18 @@ func main() {
 		cfg.Listen = *listen
 	}
 
+	mcpClient, err := NewMCPClient(cfg.MCP)
+	if err != nil {
+		log.Fatalf("mcp: %v", err)
+	}
+	vb := &voicebox{
+		cfg: cfg,
+		mcp: mcpClient,
+		// No timeout: a tool round plus generation can legitimately run for
+		// minutes, and a deadline here would truncate a reply mid-sentence.
+		upstream: &http.Client{},
+	}
+
 	mux := http.NewServeMux()
 
 	// The browser asks which backends exist. Keys are deliberately absent from
@@ -83,8 +107,10 @@ func main() {
 			Default   string `json:"default"`
 			Build     string `json:"build"`
 			ServerTTS bool   `json:"server_tts"`
+			Tools     bool   `json:"tools"`
 			Backends  []view `json:"backends"`
-		}{Default: cfg.Default, Build: buildID(*webDir), ServerTTS: cfg.ttsProxy != nil}
+		}{Default: cfg.Default, Build: buildID(*webDir), ServerTTS: cfg.ttsProxy != nil,
+			Tools: mcpClient != nil}
 		for _, b := range cfg.Backends {
 			out.Backends = append(out.Backends, view{
 				ID: b.ID, Label: b.Label,
@@ -105,6 +131,11 @@ func main() {
 		}
 		writeJSON(w, detectEffort(b, r.URL.Query().Get("model")))
 	})
+
+	// Chat completions are HANDLED rather than forwarded, because tool calling is
+	// a multi-round conversation the proxy has to drive. Everything else on /v1
+	// still passes straight through.
+	mux.HandleFunc("/v1/chat/completions", vb.handleChat)
 
 	// /v1/... proxies to the backend named by the X-Voicebox-Backend header (or
 	// ?backend=), defaulting to cfg.Default.

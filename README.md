@@ -133,6 +133,36 @@ Verified isolated with the CDN still importing (`crossOriginIsolated=true`,
 At this size the CPU fallback is genuinely fine — that is the whole point of not
 putting a 4B multimodal model in the browser.
 
+## Tools
+
+Off by default; the switch appears only when a tool server is configured. With
+it on, the model can search the web, save and recall memories, and ask the date
+— the six tools on the restricted mymcp instance (see `docs/MYMCP.md`).
+
+**The loop runs in the proxy, never the browser.** mymcp is loopback-bound, so a
+page could not reach it at all, and the bearer token must not exist in a document
+anything on the tailnet can read. `/v1/chat/completions` is therefore *handled*
+rather than forwarded when tools are in play: ask the model, receive tool calls,
+run them, feed the results back, ask again. Everything else on `/v1` still passes
+straight through, and with tools off the request is proxied exactly as before.
+
+The browser still sees one continuous SSE stream. Content and reasoning deltas
+pass through untouched — the page's parser needs no special case — and tool
+activity is added as extra frames tagged `voicebox.event` that the model never
+sees. Tool-call deltas are accumulated rather than forwarded: arguments arrive as
+partial JSON that only parses once concatenated, and a half-built function name
+spoken aloud would be gibberish.
+
+**Calls are announced in the aside voice.** Silence is far worse in audio than on
+screen — thirty seconds of nothing during a search is indistinguishable from a
+hang when there is no spinner. Failures are spoken too; successes are not, since
+the answer that follows is the report.
+
+`max_rounds` (default 4) bounds the loop. A model that keeps calling tools is a
+real failure mode and an expensive one here, since every round is latency heard
+as silence. Hitting the bound is announced rather than passed off as a finished
+answer.
+
 ## Voice vs typed
 
 Dictated messages are prefixed `[voice]`, behind a one-line system note. It

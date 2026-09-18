@@ -81,6 +81,12 @@
     color: var(--muted); font-size: 13px; white-space: pre-wrap; max-height: 8.5em; overflow-y: auto;
   }
   .think summary { cursor: pointer; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .tool {
+    font: 12px/1.5 var(--mono); color: var(--muted); margin: 2px 0 6px;
+    padding-left: 10px; border-left: 2px solid var(--accent-dim);
+  }
+  .tool.running::after { content: " …"; }
+  .tool.failed { color: var(--rec); border-left-color: var(--rec); }
   footer {
     border-top: 1px solid var(--edge); background: var(--panel);
     padding: 12px 14px; display: flex; gap: 10px; align-items: center;
@@ -170,6 +176,8 @@
     <label class="row"><span>Server</span><select id="backend"></select></label>
     <label class="row"><span>Model</span><select id="model"></select></label>
     <label class="row" id="effortRow"><span>Thinking</span><select id="effort"></select></label>
+    <label class="chk" id="toolsRow" style="display:none"><input type="checkbox" id="useTools" />
+      Let the model use tools (search, memory, date)</label>
     <label class="chk"><input type="checkbox" id="tagInput" checked />
       Tell the model when a message was dictated</label>
   </section>
@@ -269,6 +277,7 @@ function updateCrumb() {
     if (v) bits.push(v.split("·")[0].trim());
   }
   if (effortEl.style.display !== "none" && effortEl.value) bits.push(effortEl.value);
+  if (SERVER_TOOLS && $("useTools").checked) bits.push("🔧");
   $("crumb").textContent = bits.filter(Boolean).join("  ·  ");
 }
 const talkBtn = $("talk"), textEl = $("text");
@@ -313,6 +322,7 @@ let history = [];
 let busy = false;
 let BUILD = "?";
 let SERVER_TTS = false;
+let SERVER_TOOLS = false;
 
 function status(msg, kind = "") { statusEl.textContent = msg; statusEl.className = kind; }
 
@@ -340,6 +350,10 @@ async function loadBackends() {
   }
   BUILD = d.build || "?";
   SERVER_TTS = !!d.server_tts;
+  SERVER_TOOLS = !!d.tools;
+  // Hidden entirely when no tool server is configured: a switch that cannot do
+  // anything is worse than no switch.
+  $("toolsRow").style.display = SERVER_TOOLS ? "" : "none";
   console.log("[voicebox] page build", BUILD);
   backendEl.value = localStorage.getItem("vb.backend") || d.default;
   await loadModels();
@@ -872,6 +886,8 @@ async function send(userText, source = "typed") {
       // checkbox takes effect immediately instead of only for new conversations.
       body: JSON.stringify(applyEffort({
         model: modelEl.value, stream: true,
+        // Read at request time, so toggling it takes effect on the next turn.
+        ...($("useTools").checked && SERVER_TOOLS ? { voicebox_tools: true } : {}),
         messages: ($("tagInput").checked && history.some((m) => m.content.startsWith("[voice] ")))
           ? [{ role: "system", content: INPUT_MODE_PREAMBLE }, ...history]
           : history.map((m) => ({ ...m, content: stripTag(m.content) })),
@@ -896,6 +912,14 @@ async function send(userText, source = "typed") {
           if (payload === "[DONE]") continue;
           try {
             const j = JSON.parse(payload);
+
+            // voicebox's own frames: tool activity the MODEL never sees. Handled
+            // before the chat parser so an event is never mistaken for a delta.
+            if (j.object === "voicebox.event") {
+              handleToolEvent(j, out);
+              continue;
+            }
+
             const delta = j.choices?.[0]?.delta || {};
             const think = delta.reasoning ?? delta.reasoning_content;
             if (think) {
@@ -1114,6 +1138,68 @@ async function applySttEngine() {
   if (haveMic) talkBtn.textContent = talkLabel();
 }
 
+// --- tool activity ----------------------------------------------------------
+// Silence is much worse in audio than on screen: thirty seconds of nothing while
+// a search runs is indistinguishable from a hang when there is no spinner to
+// look at. So each call is announced in the aside voice, the same one the
+// reasoning uses -- it is the same kind of information, something the model is
+// doing rather than something it is telling you.
+const TOOL_SAYS = {
+  web_search_free: "searching the web",
+  web_search_paid: "searching the web",
+  memory_save: "saving that to memory",
+  memory_search: "checking my memory",
+  memory_read: "reading my memory",
+  date_now: "checking the date",
+};
+
+const toolLines = new Map();   // name -> the element showing its progress
+
+function handleToolEvent(ev, out) {
+  if (ev.error) {
+    const el = document.createElement("div");
+    el.className = "tool failed";
+    el.textContent = "⚠ " + ev.error;
+    out.parentNode.insertBefore(el, out);
+    status(ev.error, "err");
+    return;
+  }
+  if (ev.notice) {
+    const el = document.createElement("div");
+    el.className = "tool";
+    el.textContent = "· " + ev.notice;
+    out.parentNode.insertBefore(el, out);
+    return;
+  }
+  const t = ev.tool;
+  if (!t) return;
+
+  if (t.phase === "start") {
+    const el = document.createElement("div");
+    el.className = "tool running";
+    const detail = t.args && Object.keys(t.args).length
+      ? " " + JSON.stringify(t.args).slice(0, 90) : "";
+    el.textContent = "🔧 " + t.name + detail;
+    out.parentNode.insertBefore(el, out);
+    toolLines.set(t.name, el);
+    speak(TOOL_SAYS[t.name] || ("using " + t.name.replace(/_/g, " ")), "thinking");
+    logEl.scrollTop = logEl.scrollHeight;
+    return;
+  }
+
+  const el = toolLines.get(t.name);
+  if (el) {
+    el.classList.remove("running");
+    if (!t.ok) el.classList.add("failed");
+    el.textContent = (t.ok ? "🔧 " : "⚠ ") + t.name + " — " + (t.summary || (t.ok ? "done" : "failed"));
+    toolLines.delete(t.name);
+  }
+  // A failure is spoken; a success is not. The answer that follows IS the
+  // report, and narrating every success would double the talking.
+  if (!t.ok) speak(t.name.replace(/_/g, " ") + " failed", "thinking");
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
 // --- microphone -------------------------------------------------------------
 // initMic checks that the microphone is USABLE without keeping it.
 //
@@ -1317,6 +1403,11 @@ ttsEngineEl.addEventListener("change", updateCrumb);
  try {
   await loadBackends();
 
+  $("useTools").checked = SERVER_TOOLS && localStorage.getItem("vb.tools") === "1";
+  $("useTools").onchange = () => {
+    localStorage.setItem("vb.tools", $("useTools").checked ? "1" : "0");
+    updateCrumb();
+  };
   $("speakThink").checked = localStorage.getItem("vb.speakthink") === "1";
   setSpeaking(false);
   $("tagInput").checked = localStorage.getItem("vb.tag") !== "0";

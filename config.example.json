@@ -24,5 +24,10 @@
       "api_key_env": "OLLAMA_API_KEY"
     }
   ],
-  "tts_url": "http://127.0.0.1:8123"
+  "tts_url": "http://127.0.0.1:8123",
+  "mcp": {
+    "url": "http://127.0.0.1:9445/mcp",
+    "token_file": "/home/bryan/.config/mymcp/tokens/voicebox",
+    "max_rounds": 4
+  }
 }
