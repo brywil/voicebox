@@ -69,8 +69,9 @@
   <select id="model" title="Model on that server"></select>
   <select id="sttEngine" title="How speech is recognised"></select>
   <select id="ttsEngine" title="How replies are spoken">
+    <option value="piper">voice: Piper (server)</option>
     <option value="system">voice: system</option>
-    <option value="kokoro">voice: Kokoro (86 MB)</option>
+    <option value="kokoro">voice: Kokoro (in-browser)</option>
   </select>
   <select id="voice" title="Speech-out voice"></select>
   <label class="chk" title="Playback speed">
@@ -174,6 +175,7 @@ let media = null, recorder = null, chunks = [];
 let history = [];
 let busy = false;
 let BUILD = "?";
+let SERVER_TTS = false;
 
 function status(msg, kind = "") { statusEl.textContent = msg; statusEl.className = kind; }
 
@@ -200,6 +202,7 @@ async function loadBackends() {
     backendEl.appendChild(o);
   }
   BUILD = d.build || "?";
+  SERVER_TTS = !!d.server_tts;
   console.log("[voicebox] page build", BUILD);
   backendEl.value = localStorage.getItem("vb.backend") || d.default;
   await loadModels();
@@ -252,7 +255,7 @@ rateEl.oninput = () => {
   // Kokoro output is an <audio> element, so speed applies live to what is
   // already playing. The system synthesiser can only take a rate at the moment
   // an utterance starts.
-  audioEl.playbackRate = rate();
+  if (ttsEngineEl.value !== "piper") audioEl.playbackRate = rate();
 };
 rateEl.value = localStorage.getItem("vb.rate") || "1";
 rateValEl.textContent = rate().toFixed(2) + "x";
@@ -342,9 +345,63 @@ voiceEl.onchange = () => localStorage.setItem("vb.voice." + ttsEngineEl.value, v
 ttsEngineEl.onchange = async () => {
   localStorage.setItem("vb.tts", ttsEngineEl.value);
   stopSpeaking();
-  if (ttsEngineEl.value === "kokoro") await loadKokoroVoices();
+  if (ttsEngineEl.value === "piper") await loadPiperVoices();
+  else if (ttsEngineEl.value === "kokoro") await loadKokoroVoices();
   else loadSystemVoices();
 };
+
+// Piper runs on the server, so the browser downloads nothing and the speed is
+// independent of whatever the browser can negotiate with the GPU. Rate is applied
+// at SYNTHESIS (length_scale) rather than by resampling, so faster speech does
+// not come out pitch-shifted the way playbackRate makes it.
+let piperVoices = [];
+
+async function loadPiperVoices() {
+  voiceEl.innerHTML = `<option>loading…</option>`;
+  try {
+    const r = await fetch("/voices");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    piperVoices = (await r.json()).voices || [];
+    if (!piperVoices.length) throw new Error("service has no voices installed");
+    voiceEl.innerHTML = "";
+    for (const v of piperVoices) {
+      const o = document.createElement("option");
+      o.value = v.id;
+      o.textContent = `${v.name} · ${v.lang.replace("_", "-")} · ${v.quality}`;
+      o.title = v.id;
+      voiceEl.appendChild(o);
+    }
+    const saved = localStorage.getItem("vb.voice.piper");
+    if (saved && piperVoices.some((v) => v.id === saved)) voiceEl.value = saved;
+    status(`Piper ready — ${piperVoices.length} voices, on the server`);
+  } catch (e) {
+    voiceEl.innerHTML = `<option value="">(unavailable)</option>`;
+    status("Piper unavailable: " + e.message + " — falling back to system voices", "warn");
+    ttsEngineEl.value = "system";
+    loadSystemVoices();
+  }
+}
+
+async function speakPiper(text) {
+  const t0 = performance.now();
+  const r = await fetch("/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice: voiceEl.value, rate: rate() }),
+  });
+  if (!r.ok) throw new Error(`tts HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  await new Promise((resolve) => {
+    audioEl.src = url;
+    // Rate is already baked into the audio by the server; playing it back at
+    // anything but 1.0 would apply the speed-up twice.
+    audioEl.playbackRate = 1;
+    audioEl.onended = audioEl.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    audioEl.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
+  });
+  console.log(`[voicebox] piper: ${((performance.now() - t0) / 1000).toFixed(2)}s for ${text.length} chars`);
+}
 
 function stopSpeaking() {
   speechSynthesis.cancel();
@@ -364,7 +421,8 @@ async function drainTTS() {
   while (ttsQueue.length) {
     const text = ttsQueue.shift();
     try {
-      if (ttsEngineEl.value === "kokoro") await speakKokoro(text);
+      if (ttsEngineEl.value === "piper") await speakPiper(text);
+      else if (ttsEngineEl.value === "kokoro") await speakKokoro(text);
       else await speakSystem(text);
     } catch (e) {
       console.warn("[voicebox] tts:", e);
@@ -739,8 +797,11 @@ $("clear").onclick = () => { history = []; logEl.innerHTML = ""; speechSynthesis
 
   $("tagInput").checked = localStorage.getItem("vb.tag") !== "0";
   $("tagInput").onchange = () => localStorage.setItem("vb.tag", $("tagInput").checked ? "1" : "0");
-  ttsEngineEl.value = localStorage.getItem("vb.tts") || "system";
-  if (ttsEngineEl.value === "kokoro") loadKokoroVoices(); else loadSystemVoices();
+  ttsEngineEl.value = localStorage.getItem("vb.tts") || (SERVER_TTS ? "piper" : "system");
+  if (ttsEngineEl.value === "piper" && !SERVER_TTS) ttsEngineEl.value = "system";
+  if (ttsEngineEl.value === "piper") loadPiperVoices();
+  else if (ttsEngineEl.value === "kokoro") loadKokoroVoices();
+  else loadSystemVoices();
 
   await loadSttEngines();
   if (sttEngine() !== "webspeech") { STT_MODEL = WHISPER[sttEngine()].id; await ensureWhisper(); }

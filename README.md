@@ -23,9 +23,15 @@ any extension can read it.
 ## Run
 
 ```sh
-cp config.example.json config.json     # edit backends to taste
-go build -o voicebox .
-./voicebox                             # http://localhost:8080
+./run.sh                               # http://localhost:8080
+```
+
+That starts the Piper speech service and the web/proxy server together. First
+time only:
+
+```sh
+python3 -m venv .venv && ./.venv/bin/pip install piper-tts
+./.venv/bin/python -m piper.download_voices en_US-lessac-medium --data-dir voices
 ```
 
 For ollama cloud, export the key named by `api_key_env` first:
@@ -133,13 +139,32 @@ actually active, because that difference decides where your voice goes.
 
 ## Voices and speed
 
-`voice: system` uses whatever the OS offers — on this box Chrome's own Google
-voices, not just espeak. `voice: Kokoro` loads an 86 MB ONNX model with 55
-voices (~520 KB each, only the selected one fetched), sorted by Kokoro's own
-A–F grade so the good ones are at the top.
+Three engines, and the default is the server one:
 
-Speed is 0.5x–2.5x. It applies live to Kokoro playback and per-utterance to the
-system voice, which can only take a rate as an utterance starts.
+| engine | runs | download | speed |
+|---|---|---|---|
+| **Piper (server)** | on this machine's CPU | none in the browser | **12–18x realtime** |
+| system | browser / OS | none | instant |
+| Kokoro | in the browser | 86 MB | ~1x on WASM, too slow to use |
+
+**Piper is the default because the browser could not get a WebGPU adapter here**
+even with 14 GB free on the card, which left Kokoro on single-threaded WASM and
+slower than playback. Piper needs no GPU at all — measured on this box it does
+12–18x realtime on the CPU, 64–119 ms for a short reply, so the GPU stays free
+for llama-server. It is also the only engine that will work from a phone, since
+the phone would have to download and run the model otherwise.
+
+Voices are loaded once and kept: the first request for a voice pays ~2s, every
+one after is ~0.2s for a short sentence. Add more with
+
+```sh
+./.venv/bin/python -m piper.download_voices en_GB-cori-high --data-dir voices
+```
+
+Speed is 0.5x–2.5x. For Piper it is applied at **synthesis** (`length_scale`),
+so faster speech is genuinely faster rather than pitch-shifted the way changing
+playback rate would make it. For the system voice it applies per utterance;
+Kokoro uses playback rate.
 
 Note for anyone reading the kokoro-js docs: `list_voices()` only calls
 `console.table()` and returns **undefined**. The data is the `voices` getter.

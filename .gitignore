@@ -1,2 +1,5 @@
 voicebox
 config.json
+.venv/
+voices/
+__pycache__/

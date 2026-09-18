@@ -23,5 +23,6 @@
       "url": "https://ollama.com",
       "api_key_env": "OLLAMA_API_KEY"
     }
-  ]
+  ],
+  "tts_url": "http://127.0.0.1:8123"
 }

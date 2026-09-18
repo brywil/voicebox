@@ -46,6 +46,11 @@ type Config struct {
 	Listen   string     `json:"listen"`
 	Default  string     `json:"default"`
 	Backends []*Backend `json:"backends"`
+	// TTSURL is the local Piper service (tts_server.py). Proxied through this
+	// origin like everything else, so the page needs no second host and no CORS.
+	TTSURL string `json:"tts_url"`
+
+	ttsProxy *httputil.ReverseProxy
 }
 
 func main() {
@@ -75,10 +80,11 @@ func main() {
 			HasKey   bool   `json:"has_key"`
 		}
 		out := struct {
-			Default  string `json:"default"`
-			Build    string `json:"build"`
-			Backends []view `json:"backends"`
-		}{Default: cfg.Default, Build: buildID(*webDir)}
+			Default   string `json:"default"`
+			Build     string `json:"build"`
+			ServerTTS bool   `json:"server_tts"`
+			Backends  []view `json:"backends"`
+		}{Default: cfg.Default, Build: buildID(*webDir), ServerTTS: cfg.ttsProxy != nil}
 		for _, b := range cfg.Backends {
 			out.Backends = append(out.Backends, view{
 				ID: b.ID, Label: b.Label,
@@ -106,6 +112,15 @@ func main() {
 		}
 		b.proxy.ServeHTTP(w, r)
 	})
+
+	// Server-side speech synthesis. Piper runs 12-18x realtime on the CPU here,
+	// which is why it needs no GPU -- the card is usually full of llama-server,
+	// and the browser could not obtain a WebGPU adapter even when it was free.
+	if cfg.ttsProxy != nil {
+		mux.Handle("/tts", cfg.ttsProxy)
+		mux.Handle("/tts/", cfg.ttsProxy)
+		mux.Handle("/voices", cfg.ttsProxy)
+	}
 
 	mux.Handle("/", noCache(http.FileServer(http.Dir(*webDir))))
 
@@ -166,6 +181,19 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.find(cfg.Default) == nil {
 		return nil, fmt.Errorf("default backend %q is not in the list", cfg.Default)
+	}
+	if cfg.TTSURL != "" {
+		u, err := url.Parse(cfg.TTSURL)
+		if err != nil {
+			return nil, fmt.Errorf("tts_url: %w", err)
+		}
+		cfg.ttsProxy = &httputil.ReverseProxy{
+			Rewrite: func(r *httputil.ProxyRequest) { r.SetURL(u); r.Out.Host = u.Host },
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				log.Printf("[tts] %s: %v", u, err)
+				http.Error(w, "tts service unreachable: "+err.Error(), http.StatusBadGateway)
+			},
+		}
 	}
 	return &cfg, nil
 }
