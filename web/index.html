@@ -151,6 +151,22 @@ const INPUT_MODE_PREAMBLE =
   "Never mention these tags or repeat them back.";
 
 let transcriber = null;
+// Probed once and shared. Both models want the same answer, and requesting an
+// adapter twice is pointless -- but it must be probed rather than assumed: see
+// the note in ensureWhisper about navigator.gpu existing on machines that will
+// not hand one out.
+let GPU_DEVICE = null;
+async function pickDevice() {
+  if (GPU_DEVICE) return GPU_DEVICE;
+  GPU_DEVICE = "wasm";
+  if (navigator.gpu) {
+    try {
+      const a = await navigator.gpu.requestAdapter();
+      if (a) GPU_DEVICE = "webgpu";
+    } catch { /* stays wasm */ }
+  }
+  return GPU_DEVICE;
+}
 let media = null, recorder = null, chunks = [];
 let history = [];
 let busy = false;
@@ -220,7 +236,7 @@ modelEl.onchange = () => localStorage.setItem("vb.model." + backendEl.value, mod
 // ONNX model with 55 voices, loaded only when selected, and only the chosen
 // voice file (~520 KB) is fetched on top of the model.
 const KOKORO_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
-let kokoro = null, kokoroVoices = null, kokoroLoading = null;
+let kokoro = null, kokoroVoices = null, kokoroLoading = null, kokoroDevice = "?";
 
 const rateEl = $("rate"), rateValEl = $("rateVal");
 const ttsEngineEl = $("ttsEngine");
@@ -261,10 +277,11 @@ async function ensureKokoro() {
   kokoroLoading = (async () => {
     status("loading Kokoro voice model (86 MB, cached after the first run)…");
     const { KokoroTTS } = await import("https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm");
-    // Kokoro is small enough that the CPU path is fine, and WebGPU is not
-    // reliably available here anyway -- same reasoning as the recogniser.
+    const dev = await pickDevice();
+    // fp32 on the GPU, q8 on the CPU: quantised weights buy nothing once the
+    // work is on a GPU, and the fp32 graph is the better-supported path there.
     kokoro = await KokoroTTS.from_pretrained(KOKORO_MODEL, {
-      dtype: "q8", device: "wasm",
+      dtype: dev === "webgpu" ? "fp32" : "q8", device: dev,
       progress_callback: (p) => {
         if (p.status === "progress" && p.total)
           status(`Kokoro ${(100 * p.loaded / p.total).toFixed(0)}% (${p.file})`);
@@ -274,7 +291,8 @@ async function ensureKokoro() {
     // undefined. The voices getter is the actual data, keyed by voice id, with
     // {name, language, gender, overallGrade} per entry.
     kokoroVoices = kokoro.voices || {};
-    status("Kokoro ready — " + Object.keys(kokoroVoices).length + " voices");
+    kokoroDevice = dev;
+    status(`Kokoro ready on ${dev} — ${Object.keys(kokoroVoices).length} voices`);
     return kokoro;
   })().catch((e) => { kokoroLoading = null; kokoro = null; throw e; });
   return kokoroLoading;
@@ -367,7 +385,17 @@ function speakSystem(text) {
 
 async function speakKokoro(text) {
   const tts = await ensureKokoro();
+  const t0 = performance.now();
   const audio = await tts.generate(text, { voice: voiceEl.value || "af_heart" });
+  const gen = (performance.now() - t0) / 1000;
+  // Realtime factor: seconds of speech produced per second of compute. Below 1
+  // means generation cannot keep up with playback, which is what "too slow"
+  // actually means and is the number worth reporting.
+  const dur = audio.audio.length / audio.sampling_rate;
+  const rtf = dur / gen;
+  console.log(`[voicebox] kokoro ${kokoroDevice}: ${dur.toFixed(1)}s audio in ` +
+              `${gen.toFixed(1)}s = ${rtf.toFixed(2)}x realtime`);
+  if (rtf < 1) status(`Kokoro ${kokoroDevice}: ${rtf.toFixed(2)}x realtime — slower than playback`, "warn");
   const url = URL.createObjectURL(audio.toBlob());
   await new Promise((resolve) => {
     audioEl.src = url;
@@ -730,22 +758,11 @@ async function ensureWhisper() {
   if (transcriber) return transcriber;
   status("loading speech recogniser (cached after the first run)…");
 
-  // Decide the device by actually ASKING for an adapter, not by checking that
-  // navigator.gpu exists. `navigator.gpu` is present on any modern Chrome even
-  // when no adapter can be had -- a GPU already full of llama-server is the
-  // common case here -- and requesting "webgpu" then throws from deep inside
-  // onnxruntime, in a parallel Promise.all whose sibling rejections surface as
-  // "Uncaught (in promise)" no matter what the caller wraps in try/catch.
-  let device = "wasm";
-  if (navigator.gpu) {
-    try {
-      const adapter = await navigator.gpu.requestAdapter();
-      if (adapter) device = "webgpu";
-      else status("no WebGPU adapter (GPU busy or unavailable) — speech on CPU", "warn");
-    } catch (e) {
-      status("WebGPU unavailable (" + e.message + ") — speech on CPU", "warn");
-    }
-  }
+  // One shared probe for both models -- see pickDevice.
+  const device0 = await pickDevice();
+  let device = device0;
+  if (device === "wasm" && navigator.gpu)
+    status("no WebGPU adapter (GPU busy or unavailable) — speech on CPU", "warn");
 
   const opts = {
     dtype: "q8",
