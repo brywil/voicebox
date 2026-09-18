@@ -51,6 +51,36 @@ export OLLAMA_API_KEY=...              # already in ~/.bashrc on the Xeon
 
 `/api/backends` reports whether a key is *configured*, never the key itself.
 
+## On a phone
+
+Served over the tailnet with a real certificate:
+
+```sh
+sudo tailscale set --operator=$USER      # once, so serve needs no root after
+tailscale serve --bg 8080
+```
+
+→ **https://<machine>.<your-tailnet>.ts.net** (tailnet only, Let's Encrypt).
+
+The certificate is the point, not the convenience: **the microphone needs a
+secure context**, and a LAN IP over http is not one. A self-signed cert does not
+help either. `tailscale serve` also puts the page and `/v1`, `/tts`, `/voices`
+on one origin, so nothing needs CORS or a second host.
+
+The architecture pays off here: Piper is server-side, so the phone downloads no
+voice model, and choosing **Chrome (on-device)** for speech-in means no Whisper
+download either. The phone fetches essentially just the page.
+
+Touch sizing is gated on `(pointer: coarse)`, not a width breakpoint — what
+decides it is a fingertip, not a small window. Press-and-hold is a mouse idiom,
+so a coarse pointer gets tap-to-start/tap-to-stop instead: a finger that drifts
+off the button would otherwise cancel the take, and the synthesised mouse events
+Android fires after a touch re-enter the same handlers.
+
+Pick a backend that answers quickly. `qwen38-27b` on the Xeon measured **69 s to
+first token** (27B on a 16 GB card, heavily CPU-offloaded), which reads as a
+broken page rather than a slow one.
+
 ## The microphone and the LAN
 
 Serving on `:8080` makes the page reachable from the LAN, but **the mic only
