@@ -477,7 +477,46 @@ let kokoro = null, kokoroVoices = null, kokoroLoading = null, kokoroDevice = "?"
 
 const rateEl = $("rate"), rateValEl = $("rateVal");
 const ttsEngineEl = $("ttsEngine");
-let audioEl = new Audio();   // one element, so a new utterance replaces the old
+// One element, so a new utterance replaces the old rather than overlapping.
+//
+// It is REPLACED when the set of audio devices changes: a long-lived media
+// element can stay bound to the output that existed when it was created, so
+// plugging in headphones mid-conversation left the audio on the speakers until
+// the page was reloaded. A fresh element picks up the current default.
+let audioEl = new Audio();
+
+function freshAudioElement() {
+  const was = audioEl;
+  audioEl = new Audio();
+  audioEl.playbackRate = was.playbackRate;
+  try { was.pause(); } catch { /* nothing playing */ }
+  // Pausing does NOT fire `ended`, so an utterance that was mid-playback would
+  // leave its promise pending and wedge the queue permanently. Resolve it by
+  // hand -- the caller only ever waits for "this clip is finished with", and it
+  // is.
+  const done = was.onended;
+  was.onended = was.onerror = null;
+  if (typeof done === "function") done();
+}
+
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", async () => {
+    freshAudioElement();
+    // The system synthesiser holds its own output binding, which the browser
+    // only re-resolves between utterances -- cancelling forces that.
+    const wasSpeaking = speechSynthesis.speaking;
+    if (wasSpeaking) speechSynthesis.cancel();
+    let where = "";
+    try {
+      const outs = (await navigator.mediaDevices.enumerateDevices())
+        .filter((d) => d.kind === "audiooutput");
+      const dflt = outs.find((d) => d.deviceId === "default") || outs[0];
+      if (dflt?.label) where = " → " + dflt.label.replace(/^Default\s*-\s*/i, "");
+    } catch { /* labels need permission; the switch still happened */ }
+    console.log("[voicebox] audio devices changed; rebound output" + where);
+    status("audio output changed" + where);
+  });
+}
 
 function rate() { return parseFloat(rateEl.value) || 1; }
 rateEl.oninput = () => {
@@ -636,12 +675,13 @@ async function speakPiper(text, role = "reply") {
   const blob = await r.blob();
   const url = URL.createObjectURL(blob);
   await new Promise((resolve) => {
-    audioEl.src = url;
+    const el = audioEl;          // bind now; a device change may swap the global
+    el.src = url;
     // Rate is already baked into the audio by the server; playing it back at
     // anything but 1.0 would apply the speed-up twice.
-    audioEl.playbackRate = 1;
-    audioEl.onended = audioEl.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-    audioEl.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
+    el.playbackRate = 1;
+    el.onended = el.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    el.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
   });
   console.log(`[voicebox] piper: ${((performance.now() - t0) / 1000).toFixed(2)}s for ${text.length} chars`);
 }
@@ -726,10 +766,11 @@ async function speakKokoro(text) {
   if (rtf < 1) status(`Kokoro ${kokoroDevice}: ${rtf.toFixed(2)}x realtime — slower than playback`, "warn");
   const url = URL.createObjectURL(audio.toBlob());
   await new Promise((resolve) => {
-    audioEl.src = url;
-    audioEl.playbackRate = rate();
-    audioEl.onended = audioEl.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-    audioEl.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
+    const el = audioEl;
+    el.src = url;
+    el.playbackRate = rate();
+    el.onended = el.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    el.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
   });
 }
 
