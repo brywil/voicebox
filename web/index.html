@@ -953,6 +953,7 @@ async function send(userText, source = "typed") {
       }
     }
     speakStreaming("", true);
+    toolLines.delete("__progress");
     history.push({ role: "assistant", content: full });
     status(thinking
       ? `ok — ${full.length} chars (+${thinking.length} thinking, not spoken)`
@@ -1162,6 +1163,19 @@ function handleToolEvent(ev, out) {
     el.textContent = "⚠ " + ev.error;
     out.parentNode.insertBefore(el, out);
     status(ev.error, "err");
+    return;
+  }
+  // Long runs: show where we are, so a twentieth round is distinguishable from
+  // a third. Replaces itself rather than stacking a line per round.
+  if (ev.round) {
+    let el = toolLines.get("__progress");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "tool";
+      out.parentNode.insertBefore(el, out);
+      toolLines.set("__progress", el);
+    }
+    el.textContent = `· round ${ev.round}, ${ev.calls} tool calls so far`;
     return;
   }
   if (ev.notice) {

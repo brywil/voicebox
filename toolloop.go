@@ -26,7 +26,16 @@ import (
 // than a visual one: a silent thirty-second gap while something searches the web
 // is indistinguishable from a hang when you cannot see a spinner.
 
-const defaultMaxRounds = 4
+// Rounds, not tool calls: one round is one model turn, and a turn may request
+// several calls at once. Real agentic work runs far longer than first guessed --
+// Muse-Glimmer used 30-50 tool calls on its first outing in a harness -- so a
+// bound of 4 would have cut almost any genuine task off mid-thought.
+//
+// It is still bounded, because a model that never stops calling tools is a real
+// failure mode and an expensive one here: every round is latency the user hears
+// as silence. 32 is high enough not to interrupt real work and low enough to
+// stop a loop before it becomes a bill.
+const defaultMaxRounds = 32
 
 type chatRequest struct {
 	Model    string           `json:"model"`
@@ -102,6 +111,7 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 		maxRounds = defaultMaxRounds
 	}
 
+	totalCalls := 0
 	for round := 1; ; round++ {
 		raw["messages"] = messages
 		raw["stream"] = true
@@ -118,7 +128,8 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 			// Say so rather than stopping silently: an answer that quietly used
 			// fewer tools than it wanted is worse than one that admits it.
 			emitEvent(w, flusher, map[string]any{"notice": fmt.Sprintf(
-				"stopped after %d rounds of tool calls", maxRounds)})
+				"stopped after %d rounds (%d tool calls) — raise mcp.max_rounds if this was real work",
+				maxRounds, totalCalls)})
 			break
 		}
 
@@ -134,6 +145,13 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 			"role": "assistant", "content": nil, "tool_calls": tcs,
 		})
 
+		totalCalls += len(calls)
+		// Progress is worth reporting once a run is long: on a voice interface a
+		// twentieth round sounds exactly like a third, and the only signal that
+		// anything is still happening is the aside announcing each call.
+		if round >= 5 {
+			emitEvent(w, flusher, map[string]any{"round": round, "calls": totalCalls})
+		}
 		for _, c := range calls {
 			args := map[string]any{}
 			if s := strings.TrimSpace(c.Args.String()); s != "" && s != "null" {

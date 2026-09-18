@@ -28,6 +28,6 @@
   "mcp": {
     "url": "http://127.0.0.1:9445/mcp",
     "token_file": "/home/bryan/.config/mymcp/tokens/voicebox",
-    "max_rounds": 4
+    "max_rounds": 32
   }
 }
