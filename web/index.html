@@ -499,6 +499,14 @@ function freshAudioElement() {
   if (typeof done === "function") done();
 }
 
+// A phone backgrounds a tab without warning. Releasing on the way out means a
+// tab left mid-recording does not keep the microphone from the keyboard or from
+// any other app.
+window.addEventListener("pagehide", () => {
+  try { activeRecognition?.abort(); } catch { /* not running */ }
+  releaseMic(media);
+});
+
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener("devicechange", async () => {
     freshAudioElement();
@@ -963,6 +971,15 @@ async function probeWebSpeech() {
 
 function sttEngine() { return sttEngineEl.value; }
 
+// The button says what it will do, which differs per engine.
+function talkLabel() {
+  if (sttEngine() === "keyboard") return "⌨ dictate";
+  return TOUCH ? "tap to talk" : "hold to talk";
+}
+function refreshTalkButton() {
+  if (!talkBtn.disabled || sttEngine() === "keyboard") talkBtn.textContent = talkLabel();
+}
+
 // Web Speech is event-driven and does its own capture, so it does not share the
 // MediaRecorder path at all.
 function recogniseWebSpeech() {
@@ -1002,7 +1019,7 @@ function recogniseWebSpeech() {
       console.warn("[voicebox] SpeechRecognition error:", e.error, e);
       reject(new Error(why));
     };
-    r.onend = () => resolve(finalText.trim());
+    r.onend = () => { activeRecognition = null; resolve(finalText.trim()); };
     activeRecognition = r;
     r.start();
   });
@@ -1012,6 +1029,19 @@ let activeRecognition = null;
 async function loadSttEngines() {
   const avail = await probeWebSpeech();
   sttEngineEl.innerHTML = "";
+
+  // The phone already has a very good recogniser: the keyboard's own. Gboard
+  // dictation is on-device, better than anything shipped here, and needs no
+  // microphone permission from the page at all -- the keyboard owns the mic.
+  // So the honest option is to get out of the way and let it type.
+  {
+    const o = document.createElement("option");
+    o.value = "keyboard";
+    o.textContent = TOUCH ? "speech: keyboard (Gboard)" : "speech: keyboard dictation";
+    o.title = "Use your keyboard's own dictation. The button opens the text " +
+              "field; tap the keyboard's microphone. Nothing is recorded by this page.";
+    sttEngineEl.appendChild(o);
+  }
   if (SR) {
     const o = document.createElement("option");
     o.value = "webspeech";
@@ -1029,36 +1059,79 @@ async function loadSttEngines() {
   }
   const saved = localStorage.getItem("vb.stt");
   if (saved && [...sttEngineEl.options].some((o) => o.value === saved)) sttEngineEl.value = saved;
+  // On a touch device the keyboard's recogniser is the better default: it is
+  // on-device, it is the one already tuned for this phone, and it avoids asking
+  // for a microphone the page does not need.
+  else if (TOUCH) sttEngineEl.value = "keyboard";
   else sttEngineEl.value = SR ? "webspeech" : "whisper-tiny";
 }
 
 sttEngineEl.onchange = async () => {
   localStorage.setItem("vb.stt", sttEngineEl.value);
-  if (sttEngine() !== "webspeech") {
-    STT_MODEL = WHISPER[sttEngine()].id;
-    transcriber = null;             // reloaded lazily at next use
-    talkBtn.disabled = true;
-    await ensureWhisper();
-    talkBtn.disabled = false;
-  }
+  await applySttEngine();
   status("speech engine: " + sttEngineEl.options[sttEngineEl.selectedIndex].textContent);
 };
 
+// applySttEngine acquires only what the SELECTED engine needs, and is the single
+// place that decides whether the talk button is usable.
+async function applySttEngine() {
+  const eng = sttEngine();
+
+  if (eng === "keyboard") {
+    // No microphone, no model. The keyboard owns the mic and the page never
+    // touches it -- which is also why this mode needs no permission at all.
+    talkBtn.disabled = false;
+    talkBtn.textContent = talkLabel();
+    return;
+  }
+
+  if (eng !== "webspeech") {
+    STT_MODEL = WHISPER[eng].id;
+    transcriber = null;              // reloaded for the newly chosen size
+    talkBtn.disabled = true;
+    await ensureWhisper();
+  }
+
+  // Whisper records through MediaRecorder and needs the mic; Web Speech does its
+  // own capture but still needs permission.
+  const haveMic = media ? true : await initMic();
+  talkBtn.disabled = !haveMic;
+  if (haveMic) talkBtn.textContent = talkLabel();
+}
+
 // --- microphone -------------------------------------------------------------
+// initMic checks that the microphone is USABLE without keeping it.
+//
+// Holding the stream open was a real bug: an open capture on Android blocks
+// every other consumer, so the keyboard's own dictation reported "another device
+// is using the microphone" purely because this page had grabbed it at load and
+// never let go. Permission is checked by opening and immediately releasing; the
+// actual recording acquires its own stream and releases it again at the end.
 async function initMic() {
   if (!navigator.mediaDevices?.getUserMedia) {
-    status("no microphone API — this origin is not a secure context. Use http://localhost, or see README.", "err");
+    status("no microphone API — this origin is not a secure context. Use https, or see README.", "err");
     talkBtn.textContent = "no mic";
     return false;
   }
   try {
-    media = await navigator.mediaDevices.getUserMedia({ audio: true });
+    releaseMic(await navigator.mediaDevices.getUserMedia({ audio: true }));
     return true;
   } catch (e) {
     status("microphone blocked: " + e.message, "err");
     talkBtn.textContent = "no mic";
     return false;
   }
+}
+
+// releaseMic stops every track, which is what actually hands the device back.
+// Dropping the reference is not enough -- the capture stays live until the
+// tracks are stopped.
+function releaseMic(stream) {
+  if (!stream) return;
+  for (const t of stream.getTracks()) {
+    try { t.stop(); } catch { /* already ended */ }
+  }
+  if (stream === media) media = null;
 }
 
 async function startRec() {
@@ -1073,7 +1146,16 @@ async function startRec() {
     return;
   }
 
-  if (!media) return;
+  // Acquired per take and released in stopRec, so the microphone is only held
+  // while actually recording.
+  try {
+    media = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    recording = false;
+    status("microphone unavailable: " + e.message +
+           " — another app may have it; the keyboard engine avoids this entirely", "err");
+    return;
+  }
   chunks = [];
   recorder = new MediaRecorder(media);
   recorder.ondataavailable = (e) => chunks.push(e.data);
@@ -1110,6 +1192,7 @@ async function stopRec() {
   const done = new Promise((res) => (recorder.onstop = res));
   recorder.stop();
   await done;
+  releaseMic(media);   // hand the device back before transcribing, not after
   talkBtn.classList.remove("rec");
   talkBtn.textContent = TOUCH ? "tap to talk" : "hold to talk";
   status("transcribing…");
@@ -1166,7 +1249,16 @@ const TOUCH = window.matchMedia("(pointer: coarse)").matches;
 let recording = false;
 
 async function beginRec() {
-  if (recording || busy) return;
+  if (busy) return;
+  // Nothing to record: hand over to the keyboard. There is no API to raise its
+  // dictation directly, so the most a page may do is focus the field, which
+  // brings up the keyboard with its microphone one tap away.
+  if (sttEngine() === "keyboard") {
+    textEl.focus();
+    status("dictate with the keyboard's mic, then send");
+    return;
+  }
+  if (recording) return;
   recording = true;
   await startRec();
 }
@@ -1200,7 +1292,6 @@ ttsEngineEl.addEventListener("change", updateCrumb);
 (async () => {
  try {
   await loadBackends();
-  const haveMic = await initMic();
 
   $("speakThink").checked = localStorage.getItem("vb.speakthink") === "1";
   setSpeaking(false);
@@ -1214,9 +1305,11 @@ ttsEngineEl.addEventListener("change", updateCrumb);
 
   await loadEffort();
   await loadSttEngines();
-  if (sttEngine() !== "webspeech") { STT_MODEL = WHISPER[sttEngine()].id; await ensureWhisper(); }
-
-  if (haveMic) { talkBtn.disabled = false; talkBtn.textContent = TOUCH ? "tap to talk" : "hold to talk"; }
+  // Engine first, THEN whatever that engine needs. Asking for the microphone
+  // before knowing the engine prompted for a permission the keyboard mode never
+  // uses, and loading Whisper before knowing the engine pulled 40 MB for a
+  // recogniser that was not going to run.
+  await applySttEngine();
   syncThinkVoices();
   updateCrumb();
   status(`ready [build ${BUILD}] — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);

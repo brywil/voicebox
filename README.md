@@ -165,11 +165,25 @@ the transcription.
 
 ## Speech engines
 
-| engine | where the audio goes | download |
-|---|---|---|
-| Chrome, on-device | nowhere — stays on the machine | Chrome's language pack |
-| Chrome, cloud | Google | none |
-| Whisper tiny/base/small | nowhere | 40 / 80 / 250 MB |
+| engine | where the audio goes | download | page touches the mic? |
+|---|---|---|---|
+| **keyboard (Gboard)** | nowhere — the keyboard's own recogniser | none | **no** |
+| Chrome, on-device | nowhere — stays on the machine | Chrome's language pack | yes |
+| Chrome, cloud | Google | none | yes |
+| Whisper tiny/base/small | nowhere | 40 / 80 / 250 MB | yes |
+
+**Keyboard dictation is the default on touch devices**, and is usually the best
+option there: Gboard's recogniser is on-device, already tuned for that phone, and
+better than anything this page can ship. The button focuses the text field and
+the keyboard's microphone does the rest — there is no API to raise its dictation
+directly, so focusing the field is the most a page may do.
+
+It also avoids a conflict rather than managing one. **The microphone is held only
+while actually recording**, and not at all in keyboard mode. An earlier version
+acquired it at load and never released the stream, which on Android blocks every
+other consumer — the keyboard reported "another device is using the microphone"
+purely because this page had taken it. Dropping the reference is not enough; the
+tracks must be stopped, which is what hands the device back.
 
 Chrome's recogniser is the same Google speech stack behind Gboard's voice typing;
 [Chrome 139 added an on-device mode](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition/available_static)
