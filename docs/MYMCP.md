@@ -64,23 +64,45 @@ full browser control. For a page reachable unauthenticated from the LAN those
 are worth removing too, which is the argument for finishing the `ro` preset
 rather than relying on flags.
 
-## Intended configuration for voicebox
+## Built: a whitelist, and a second instance
 
-A **second instance**, so the existing one keeps its powers:
+`--tools` was added to mymcp (`314a3c7`) and takes an explicit whitelist rather
+than a preset to subtract from. `all` and `ro` are accepted as words inside the
+list, so `--tools ro,memory_save` reads as "everything read-only, plus the
+ability to remember".
 
-```ini
-# ~/.config/systemd/user/mymcp-voicebox.service
-ExecStart=/home/bryan/.local/bin/mymcp serve \
-  --addr 127.0.0.1:9445 \
-  --workspace %h/.local/share/voicebox/scratch \
-  --memory-dir %h/.local/share/voicebox/memory \
-  --allow-exec=false
-```
+**It is enforced in `CallTool`, not just `ListTools`.** Filtering the listing
+alone would be theatre — a catalog is a hint, and a model that has seen a tool
+name anywhere can simply ask for it. The test that matters asserts a
+non-whitelisted tool does not *run*, and was confirmed to fail against a version
+that filtered only the listing.
 
-with its own token (`mymcp token add voicebox`), which also gives it its own
-memory namespace. voicebox reaches it from the Go proxy, never from the browser:
-mymcp is loopback-bound, and the token must not be in a page any LAN client can
-read.
+### The six
 
-Not yet built — the tool-calling loop in voicebox is still to come. This file
-records the decision and the reason so it does not have to be re-derived.
+| tool | why |
+|---|---|
+| `web_search_free` | browser-backed (Brave via CDP on 9222) — **needs goclaw-chromium** |
+| `web_search_paid` | Ollama API, costs per query; the fallback when the browser is down |
+| `memory_save` | a WRITE, and therefore outside `ro` — the reason `--tools` takes names |
+| `memory_search`, `memory_read` | recall |
+| `date_now` | so the model can orient itself in time |
+
+Verified against the running instance: unauthenticated requests get 401, the
+listing shows exactly those six, and `run_command`, `read_file`, `http_request`,
+`evaluate` and `write_file` are all refused **on dispatch** with "tool not
+available". `memory_save` writes to `<memory-dir>/voicebox/MEMORY.md` — its own
+principal namespace, isolated from `thor` and `mellum`.
+
+## The configuration, as deployed
+
+A second instance on **9445**, so the existing one on 9443 keeps its powers.
+`systemd/mymcp-voicebox.service` in this repo is the unit as deployed; its own
+token comes from `mymcp token add voicebox`.
+
+voicebox will reach it **from the Go proxy, never from the browser**: mymcp is
+loopback-bound, and the token must not be in a page that anything on the tailnet
+can read.
+
+Still to come: the tool-calling loop itself, and speaking tool invocations as
+asides in the thinking voice — silence during a search is much worse in audio
+than on screen.
