@@ -102,7 +102,11 @@
      thing that matters is a fingertip, not a small window -- a narrow desktop
      window still has a mouse and does not need 56px targets.
      44px is the usual floor for a reliable tap; the primary action gets more. */
+  /* Keyboard-dictation mode: no talk button, so the field is the control. */
+  body.kbd-mode #text { font-size: 16px; }
   @media (pointer: coarse) {
+    body.kbd-mode #text { flex: 1 0 100%; min-height: 54px; }
+    body.kbd-mode footer { gap: 8px; }
     body { font-size: 16px; }
 
     header { padding: 10px 12px; gap: 8px; }
@@ -1076,14 +1080,25 @@ sttEngineEl.onchange = async () => {
 // place that decides whether the talk button is usable.
 async function applySttEngine() {
   const eng = sttEngine();
+  const keyboard = eng === "keyboard";
 
-  if (eng === "keyboard") {
+  // In keyboard mode the big button has almost nothing to do: a page cannot
+  // raise the keyboard's dictation (no API survives -- x-webkit-speech was
+  // removed and nothing replaced it), so all it can do is focus a field you
+  // could have tapped yourself. Hiding it and giving the field the whole row is
+  // more honest than a large control that only opens a keyboard.
+  talkBtn.style.display = keyboard ? "none" : "";
+  document.body.classList.toggle("kbd-mode", keyboard);
+
+  if (keyboard) {
     // No microphone, no model. The keyboard owns the mic and the page never
     // touches it -- which is also why this mode needs no permission at all.
     talkBtn.disabled = false;
     talkBtn.textContent = talkLabel();
+    textEl.placeholder = "tap here, then the keyboard's 🎤";
     return;
   }
+  textEl.placeholder = "…or type here and press Enter";
 
   if (eng !== "webspeech") {
     STT_MODEL = WHISPER[eng].id;

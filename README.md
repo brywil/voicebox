@@ -172,11 +172,18 @@ the transcription.
 | Chrome, cloud | Google | none | yes |
 | Whisper tiny/base/small | nowhere | 40 / 80 / 250 MB | yes |
 
-**Keyboard dictation is the default on touch devices**, and is usually the best
-option there: Gboard's recogniser is on-device, already tuned for that phone, and
-better than anything this page can ship. The button focuses the text field and
-the keyboard's microphone does the rest — there is no API to raise its dictation
-directly, so focusing the field is the most a page may do.
+**Keyboard dictation** uses Gboard's own recogniser — on-device, already tuned
+for that phone. But note what it cannot be: **a page cannot raise the keyboard's
+dictation.** `x-webkit-speech` was removed years ago and nothing replaced it, so
+the flow is inherently two taps — open the field, then tap the keyboard's mic.
+In this mode the talk button is hidden entirely and the text field takes the
+row, because a large button whose only power is focusing a field you could tap
+yourself is worse than no button.
+
+**For one tap, use `Chrome (on-device)` instead.** On Android that is Google's
+recogniser — the same family behind Gboard's voice typing — reached through the
+Web Speech API, so the quality is comparable and the page can start and stop it
+directly.
 
 It also avoids a conflict rather than managing one. **The microphone is held only
 while actually recording**, and not at all in keyboard mode. An earlier version
