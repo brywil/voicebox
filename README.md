@@ -22,12 +22,21 @@ any extension can read it.
 
 ## Run
 
+Installed as two systemd user units — `voicebox-tts` (Piper) and `voicebox`
+(page + proxy), the second a soft dependency of the first so the page still
+works without speech:
+
 ```sh
-./run.sh                               # http://localhost:8080
+cp systemd/*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now voicebox-tts voicebox
 ```
 
-That starts the Piper speech service and the web/proxy server together. First
-time only:
+`OLLAMA_API_KEY` comes from `~/.config/voicebox/voicebox.env` (mode 600), read by
+the unit and injected upstream by the proxy, so it never reaches a browser tab.
+
+`./run.sh` does the same thing in the foreground for development. First time
+only:
 
 ```sh
 python3 -m venv .venv && ./.venv/bin/pip install piper-tts
