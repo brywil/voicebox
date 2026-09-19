@@ -1,0 +1,127 @@
+version: '3'
+
+vars:
+  BINARY: voicebox
+  BUILD_DIR: build
+  INSTALL_DIR: '{{.HOME}}/.local/bin'
+  UNIT_DIR: '{{.HOME}}/.config/systemd/user'
+  VENV: .venv
+  SC: 'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user'
+
+tasks:
+  default:
+    desc: "List available tasks"
+    cmds: [task --list]
+    silent: true
+
+  build:
+    desc: "Build the Go server to {{.BUILD_DIR}}/{{.BINARY}}"
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -o {{.BUILD_DIR}}/{{.BINARY}} .
+
+  test:
+    desc: "Run the Go tests"
+    cmds: [go test ./...]
+
+  check:
+    desc: "gofmt check + vet + test"
+    cmds:
+      - test -z "$(gofmt -l . | grep -v '^{{.VENV}}/')" || { echo 'gofmt needed:'; gofmt -l .; exit 1; }
+      - go vet ./...
+      - go test ./...
+
+  venv:
+    desc: "Create the Python venv and install piper-tts (first run only)"
+    status: ['test -x {{.VENV}}/bin/python']
+    cmds:
+      - python3 -m venv {{.VENV}}
+      - '{{.VENV}}/bin/pip install -q --upgrade pip'
+      - '{{.VENV}}/bin/pip install -q piper-tts'
+
+  voices:
+    desc: "Download Piper voices (VOICE=en_US-lessac-medium by default)"
+    deps: [venv]
+    vars:
+      VOICE: '{{.VOICE | default "en_US-lessac-medium"}}'
+    cmds:
+      - '{{.VENV}}/bin/python -m piper.download_voices {{.VOICE}} --data-dir voices'
+      - ls -la voices/
+
+  config:
+    desc: "Create config.json from the example if it does not exist"
+    status: ['test -f config.json']
+    cmds:
+      - cp config.example.json config.json
+      - cmd: echo "edit config.json - backends, tts_url, mcp.url and mcp.token_file are machine-specific"
+
+  setup:
+    desc: "First-run setup on a new machine: venv, a voice, config, units"
+    cmds:
+      - task: venv
+      - task: voices
+      - task: config
+      - task: install-units
+      - cmd: echo "next - put OLLAMA_API_KEY in ~/.config/voicebox/voicebox.env (mode 600), then run - task deploy"
+
+  install-units:
+    desc: "Install/update the voicebox and voicebox-tts user units"
+    cmds:
+      - mkdir -p {{.UNIT_DIR}}
+      - cp systemd/voicebox.service systemd/voicebox-tts.service {{.UNIT_DIR}}/
+      - '{{.SC}} daemon-reload'
+      - '{{.SC}} enable voicebox-tts voicebox'
+
+  install:
+    desc: "Build and install the binary into {{.INSTALL_DIR}}"
+    deps: [build]
+    cmds:
+      - mkdir -p {{.INSTALL_DIR}}
+      - cp {{.BUILD_DIR}}/{{.BINARY}} {{.INSTALL_DIR}}/{{.BINARY}}.new
+      - mv -f {{.INSTALL_DIR}}/{{.BINARY}}.new {{.INSTALL_DIR}}/{{.BINARY}}
+
+  deploy:
+    desc: "Check, build, restart both services, verify they answer"
+    cmds:
+      - task: check
+      - task: build
+      - '{{.SC}} restart voicebox-tts || true'
+      - '{{.SC}} restart voicebox'
+      - sleep 3
+      - '{{.SC}} is-active voicebox voicebox-tts'
+      - curl -sf http://127.0.0.1:8080/api/backends | python3 -m json.tool | head -5
+
+  start:
+    desc: "Start both services"
+    cmds: ['{{.SC}} start voicebox-tts voicebox']
+
+  stop:
+    desc: "Stop both services"
+    cmds: ['{{.SC}} stop voicebox voicebox-tts']
+
+  restart:
+    desc: "Restart both services"
+    cmds: ['{{.SC}} restart voicebox-tts voicebox']
+
+  status:
+    desc: "Service status and what the server reports"
+    cmds:
+      - '{{.SC}} status voicebox --no-pager | head -12 || true'
+      - '{{.SC}} status voicebox-tts --no-pager | head -8 || true'
+      - curl -sf http://127.0.0.1:8080/api/backends | python3 -m json.tool || true
+
+  logs:
+    desc: "Follow the voicebox logs (TTS=1 for the speech service instead)"
+    cmds:
+      - '{{.SC}} -f -u {{if .TTS}}voicebox-tts{{else}}voicebox{{end}} --no-pager || XDG_RUNTIME_DIR=/run/user/$(id -u) journalctl --user -fu {{if .TTS}}voicebox-tts{{else}}voicebox{{end}}'
+
+  serve:
+    desc: "Expose over the tailnet with HTTPS (needed for the microphone)"
+    cmds:
+      - tailscale serve --bg 8080
+      - tailscale serve status
+
+  clean:
+    desc: "Remove build artifacts"
+    cmds:
+      - rm -rf {{.BUILD_DIR}} {{.BINARY}}

@@ -20,6 +20,30 @@ Serving the page and the API from one origin removes all three. It also keeps
 the ollama cloud API key on the server side instead of in a browser tab, where
 any extension can read it.
 
+## What it is
+
+| part | language | build |
+|---|---|---|
+| proxy + server (`main.go`, `mcp.go`, `toolloop.go`, `effort.go`) | Go, stdlib only, no dependencies | `go build` |
+| speech synthesis (`tts_server.py`) | Python + `piper-tts` in a venv | none |
+| UI (`web/index.html`) | vanilla HTML/JS — no framework, no bundler | none |
+
+`task --list` for everything. On a new machine:
+
+```sh
+task setup          # venv, a Piper voice, config.json, the two user units
+task deploy         # check, build, restart, verify the server answers
+task serve          # tailscale serve --bg 8080, for HTTPS (the microphone needs it)
+```
+
+`task status` / `task logs` / `task restart` do the obvious. `task voices
+VOICE=en_GB-cori-high` adds a voice.
+
+Machine-specific things `task setup` cannot do for you: `config.json` (backends,
+`tts_url`, `mcp.url`, `mcp.token_file`), `~/.config/voicebox/voicebox.env` with
+`OLLAMA_API_KEY` at mode 600, and an `mymcp token add voicebox` on that host —
+tokens are per-machine.
+
 ## Run
 
 Installed as two systemd user units — `voicebox-tts` (Piper) and `voicebox`
