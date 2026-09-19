@@ -339,13 +339,31 @@ Families spell it differently — Muse-Glimmer `reasoning_strength`, gpt-oss
 `reasoning_effort`, Qwen3 a boolean `enable_thinking` — and most models have no
 such knob, so a fixed list would be wrong more often than right.
 
+The cap and the template answer **different questions**:
+`chat_template_caps.supports_reasoning_effort` says only that a top-level
+`reasoning_effort` field is honoured — the *mechanism*. Which values it accepts
+lives in the template. Conflating them meant a llama.cpp build new enough to
+populate that cap short-circuited the template scan and served a hardcoded
+low/medium/high.
+
 **The levels are read from the template too, not assumed.** Hardcoding
 low/medium/high cost Ornith-1.5 its `none`: that template accepts `none`, `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh` and more, and the `none` branch sets
 `_initial_thinking = false` — a genuine off switch. A model that spends three
 thousand characters deliberating over a one-line question had no way to stop it.
-Measured after the fix: `none` gives 0 reasoning chars and 4 completion tokens
-against `high`'s 15 and 19, for the same correct answer. The control is
+Measured against Ornith-1.5 (17×23, all five answering 391 correctly):
+
+| effort | completion tokens | reasoning chars |
+|---|---|---|
+| none | 4 | 0 |
+| minimal | 18 | 13 |
+| low | 17 | 12 |
+| high | 18 | 13 |
+| xhigh | 48 | 60 |
+
+`none` is a genuine off switch and 12× cheaper than `xhigh`; minimal/low/high
+are indistinguishable on a prompt this small. On a voice interface that spread is
+the difference between instant and a pause. (Spark-session measurements.) The control is
 hidden entirely when nothing is supported, and re-asked whenever the model
 changes, because the capability belongs to the weights rather than the server.
 

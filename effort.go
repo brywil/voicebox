@@ -62,6 +62,23 @@ var effortLevels = []string{"low", "medium", "high"}
 // off switch, despite its template having one.
 var effortVocab = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
 
+// applyTemplateLevels replaces a knob's assumed vocabulary with the one its
+// template actually quotes, when that can be determined. The caller decides the
+// KIND; only the template knows the LEVELS.
+func applyTemplateLevels(k *effortKnob, tmpl string) {
+	if strings.TrimSpace(tmpl) == "" {
+		return
+	}
+	// Boolean knobs already carry their own two values.
+	if len(k.Levels) == 2 && k.Levels[0] == "false" {
+		return
+	}
+	if lv := levelsFromTemplate(tmpl); lv != nil {
+		k.Levels, k.Labels = lv, lv
+		k.Source += " (levels read from the template)"
+	}
+}
+
 // levelsFromTemplate returns the vocabulary words the template actually quotes.
 // Returns nil when it cannot tell, so the caller keeps its default.
 func levelsFromTemplate(tmpl string) []string {
@@ -87,8 +104,17 @@ func detectEffort(b *Backend, model string) effortKnob {
 	if props, err := getJSON(cl, b, "/props", nil); err == nil {
 		if caps, ok := props["chat_template_caps"].(map[string]any); ok {
 			if v, _ := caps["supports_reasoning_effort"].(bool); v {
-				return effortKnob{Kind: "reasoning_effort", Levels: effortLevels,
+				k := effortKnob{Kind: "reasoning_effort", Levels: effortLevels,
 					Labels: effortLevels, Source: "llama.cpp chat_template_caps"}
+				// The cap answers only which MECHANISM is honoured -- a top-level
+				// reasoning_effort field. It says nothing about which values that
+				// field accepts, and returning a hardcoded low/medium/high here
+				// short-circuited the template scan entirely: on a build that
+				// populates this cap, Ornith-1.5 lost its "none" and there was no
+				// way to turn reasoning off at all.
+				tmpl, _ := props["chat_template"].(string)
+				applyTemplateLevels(&k, tmpl)
+				return k
 			}
 		}
 		if tmpl, _ := props["chat_template"].(string); strings.TrimSpace(tmpl) != "" {
@@ -96,15 +122,7 @@ func detectEffort(b *Backend, model string) effortKnob {
 				if strings.Contains(tmpl, k.Variable) {
 					k.Kind = "chat_template_kwargs"
 					k.Source = "found " + k.Variable + " in the chat template"
-					// Boolean knobs have their vocabulary already; word-valued
-					// ones get theirs from the template, which is the only place
-					// the real answer lives.
-					if len(k.Levels) != 2 || k.Levels[0] != "false" {
-						if lv := levelsFromTemplate(tmpl); lv != nil {
-							k.Levels, k.Labels = lv, lv
-							k.Source += " (levels read from the template)"
-						}
-					}
+					applyTemplateLevels(&k, tmpl)
 					return k
 				}
 			}
