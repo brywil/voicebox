@@ -7,7 +7,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/bryan/src/voicebox
-# Preloading a voice costs ~2s once, so the first spoken reply does not pay it.
 ExecStart=/home/bryan/src/voicebox/.venv/bin/python tts_server.py --preload en_US-lessac-medium
 Restart=always
 RestartSec=5

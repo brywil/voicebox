@@ -1,16 +1,12 @@
 [Unit]
 Description=voicebox — browser voice interface for local and cloud LLMs
 Documentation=file:///home/bryan/src/voicebox/README.md
-# The speech service is a soft dependency: the page and the chat proxy work
-# without it, falling back to the browser's own voices.
 After=network-online.target voicebox-tts.service
 Wants=network-online.target voicebox-tts.service
 
 [Service]
 Type=simple
 WorkingDirectory=/home/bryan/src/voicebox
-# Holds OLLAMA_API_KEY, mode 600. The proxy injects it upstream so the key never
-# reaches a browser tab, where any extension could read it.
 EnvironmentFile=-/home/bryan/.config/voicebox/voicebox.env
 ExecStart=/home/bryan/src/voicebox/voicebox
 Restart=always

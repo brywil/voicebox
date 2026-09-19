@@ -1,21 +1,11 @@
 [Unit]
 Description=mymcp (voicebox) — a deliberately tiny tool catalog
 Documentation=file:///home/bryan/src/voicebox/docs/MYMCP.md
-# web_search_free renders Brave through the CDP browser; without it that tool
-# fails and only the paid (Ollama API) path works.
 After=network-online.target goclaw-chromium.service
 Wants=network-online.target goclaw-chromium.service
 
 [Service]
 Type=simple
-# Six tools, named explicitly rather than reached by subtracting from a preset.
-# voicebox is served unauthenticated to anything on the tailnet and the model
-# chooses the calls, so the catalog is the security boundary: no shell, no
-# filesystem, no browser control, no http_request.
-#
-# memory_save is a WRITE and therefore outside the `ro` preset -- which is the
-# whole reason --tools takes explicit names. Its writes are confined to this
-# instance's own memory dir, under its own principal.
 ExecStart=/home/bryan/.local/bin/mymcp serve \
   --addr 127.0.0.1:9445 \
   --workspace %h/.local/share/voicebox/scratch \
