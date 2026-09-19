@@ -132,6 +132,7 @@
   /* Keyboard-dictation mode: no talk button, so the field is the control. */
   body.kbd-mode #text { font-size: 16px; }
   @media (pointer: coarse) {
+    .replay { padding: 8px 14px; font-size: 14px; min-height: 40px; }
     body.kbd-mode #text { flex: 1 0 100%; min-height: 54px; }
     body.kbd-mode footer { gap: 8px; }
     body { font-size: 16px; }
@@ -709,6 +710,9 @@ async function loadPiperVoices() {
 
 async function speakPiper(text, role = "reply") {
   const t0 = performance.now();
+  // Generation for the NEXT sentence is a fetch, and a hidden tab throttles
+  // those. Playback of an already-fetched clip continues; the gap between clips
+  // is where a backgrounded queue stalls.
   // Thinking is an ASIDE: a different voice, quieter, and a shade quicker. The
   // point is that you can tell without listening for it whether the model is
   // reasoning or answering -- otherwise a long chain of thought is
@@ -789,6 +793,23 @@ textEl.addEventListener("focus", () => {
 function setSpeaking(on) {
   shushBtn.disabled = !on;
   shushBtn.classList.toggle("active", on);
+
+  // Declare this as a media session. No permission exists for background audio,
+  // but a page Chrome recognises as PLAYING MEDIA is treated very differently
+  // from one that merely happens to make noise: it survives being backgrounded,
+  // and the reply gets lock-screen and headphone controls for free. Without it
+  // a phone is entitled to stop us the moment the tab is hidden.
+  if (!("mediaSession" in navigator)) return;
+  try {
+    navigator.mediaSession.playbackState = on ? "playing" : "none";
+    if (on) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: "voicebox", artist: modelEl.selectedOptions[0]?.textContent || "reply",
+      });
+      navigator.mediaSession.setActionHandler("pause", () => { stopSpeaking(); });
+      navigator.mediaSession.setActionHandler("stop", () => { stopSpeaking(); });
+    }
+  } catch { /* metadata is a nicety; never let it break playback */ }
 }
 
 async function drainTTS() {
@@ -1002,6 +1023,7 @@ async function send(userText, source = "typed") {
     }
     speakStreaming("", true);
     toolLines.delete("__progress");
+    addReplay(out, full);
     history.push({ role: "assistant", content: full });
     status(thinking
       ? `ok — ${full.length} chars (+${thinking.length} thinking, not spoken)`
@@ -1260,6 +1282,43 @@ function handleToolEvent(ev, out) {
   // report, and narrating every success would double the talking.
   if (!t.ok) speak(t.name.replace(/_/g, " ") + " failed", "thinking");
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+// addReplay puts a speak-again control under a finished reply.
+//
+// Independently useful, and the honest answer to a tab that was backgrounded
+// mid-sentence: the audio is generated on demand, so replaying costs a round
+// trip and nothing was stored. Added only when there is something to say and
+// only once per turn.
+function addReplay(out, text) {
+  if (!text || !text.trim() || !out.parentNode) return;
+  if (out.parentNode.querySelector(".replay")) return;
+  const b = document.createElement("button");
+  b.className = "replay";
+  b.textContent = "🔊 replay";
+  b.title = "Speak this reply again";
+  b.onclick = () => {
+    stopSpeaking();
+    // Bypasses the "speak replies" checkbox on purpose: pressing replay IS the
+    // request, and refusing because a global toggle is off would be obtuse.
+    for (const part of splitForSpeech(text)) ttsQueue.push({ text: part, role: "reply" });
+    drainTTS();
+  };
+  out.parentNode.appendChild(b);
+}
+
+// splitForSpeech breaks a reply into the same sentence-sized pieces the live
+// stream uses, so a replay sounds identical to the original.
+function splitForSpeech(md) {
+  const clean = speakableText(md);
+  if (!clean) return [];
+  const out = [];
+  let rest = clean, m;
+  while ((m = rest.match(/^[\s\S]*?[.!?…](\s|$)/))) {
+    out.push(m[0]); rest = rest.slice(m[0].length);
+  }
+  if (rest.trim()) out.push(rest);
+  return out.filter((p) => /[a-z0-9]/i.test(p));
 }
 
 // --- microphone -------------------------------------------------------------
