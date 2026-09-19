@@ -341,8 +341,17 @@ rather than quoted from one run.
 
 ## Reasoning models
 
-Most of what ollama cloud serves streams a separate `reasoning` field alongside
-`content`. voicebox shows reasoning collapsed and **never speaks it** — listening
+Models stream their thinking in a separate field alongside `content` — **and they
+do not agree on its name**: ollama cloud's use `reasoning`, Ornith-1.5 uses
+`reasoning_content`. The page reads both.
+
+The proxy must not enumerate them. The tool loop originally forwarded a delta
+only if it carried `content` or `reasoning`, which silently dropped every
+`reasoning_content` frame — parsed, matched nothing, gone. It now forwards any
+delta that is not *purely* tool-call plumbing, so an unrecognised field is
+treated as output a newer model added rather than something to hide. That filter
+exists only to withhold half-built function names and argument fragments, which
+are meaningless mid-stream and gibberish read aloud. voicebox shows reasoning collapsed and **never speaks it** — listening
 to a model deliberate for thirty seconds before it answers is unusable. Only
 `content` is read aloud.
 

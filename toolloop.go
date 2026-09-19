@@ -233,19 +233,12 @@ func (h *voicebox) streamRound(ctx context.Context, b *Backend, payload map[stri
 		}
 		var chunk struct {
 			Choices []struct {
-				Delta struct {
-					Content   *string `json:"content"`
-					Reasoning *string `json:"reasoning"`
-					ToolCalls []struct {
-						Index    int    `json:"index"`
-						ID       string `json:"id"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-				FinishReason *string `json:"finish_reason"`
+				// Kept raw so forwarding can be decided on the keys actually
+				// present. Enumerating fields worked until a model used
+				// "reasoning_content" rather than "reasoning": its thinking was
+				// parsed, matched nothing, and was dropped silently.
+				Delta        json.RawMessage `json:"delta"`
+				FinishReason *string         `json:"finish_reason"`
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -258,10 +251,24 @@ func (h *voicebox) streamRound(ctx context.Context, b *Backend, payload map[stri
 		if ch.FinishReason != nil && *ch.FinishReason != "" {
 			finish = *ch.FinishReason
 		}
+
+		var delta struct {
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		}
+		_ = json.Unmarshal(ch.Delta, &delta)
+		var raw map[string]json.RawMessage
+		_ = json.Unmarshal(ch.Delta, &raw)
 		// Tool-call deltas are ACCUMULATED, not forwarded: a half-built function
 		// name rendered into the transcript would be noise, and spoken aloud it
 		// would be gibberish.
-		for _, tc := range ch.Delta.ToolCalls {
+		for _, tc := range delta.ToolCalls {
 			c := byIndex[tc.Index]
 			if c == nil {
 				c = &toolCall{}
@@ -276,9 +283,15 @@ func (h *voicebox) streamRound(ctx context.Context, b *Backend, payload map[stri
 			}
 			c.Args.WriteString(tc.Function.Arguments)
 		}
-		// Everything the user should see or hear goes straight through, so the
-		// page's existing parser needs no special case.
-		if ch.Delta.Content != nil || ch.Delta.Reasoning != nil {
+		// Forward anything that is not PURELY a tool-call delta.
+		//
+		// The filter exists only to withhold half-built function names and
+		// argument fragments, which are meaningless mid-stream and gibberish
+		// spoken aloud. Everything else belongs to the user and the page can
+		// decide what to do with it -- including fields this proxy has never
+		// heard of. Listing the fields to forward inverts that and loses any
+		// key not anticipated here.
+		if hasUserVisibleDelta(raw) {
 			_, _ = io.WriteString(w, "data: "+payload+"\n\n")
 			if flusher != nil {
 				flusher.Flush()
@@ -299,6 +312,24 @@ func (h *voicebox) streamRound(ctx context.Context, b *Backend, payload map[stri
 		}
 	}
 	return calls, finish, nil
+}
+
+// hasUserVisibleDelta reports whether a delta carries anything beyond tool-call
+// plumbing. Unknown keys count as visible: a field this proxy does not recognise
+// is far more likely to be output a newer model added than something that should
+// be hidden.
+func hasUserVisibleDelta(delta map[string]json.RawMessage) bool {
+	for k, v := range delta {
+		switch k {
+		case "tool_calls", "role", "refusal":
+			continue
+		}
+		if len(v) == 0 || string(v) == "null" || string(v) == `""` {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // emitEvent sends a voicebox-only SSE frame. It is shaped like a chat chunk so
