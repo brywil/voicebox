@@ -60,7 +60,8 @@ sudo tailscale set --operator=$USER      # once, so serve needs no root after
 tailscale serve --bg 8080
 ```
 
-→ **https://<machine>.<your-tailnet>.ts.net** (tailnet only, Let's Encrypt).
+→ `https://<machine>.<your-tailnet>.ts.net` (tailnet only, Let's Encrypt).
+`tailscale serve status` prints the exact name.
 
 The certificate is the point, not the convenience: **the microphone needs a
 secure context**, and a LAN IP over http is not one. A self-signed cert does not
