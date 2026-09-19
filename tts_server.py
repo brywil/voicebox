@@ -127,7 +127,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--listen", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8123)
-    ap.add_argument("--preload", default="", help="comma-separated voice ids to load at start")
+    ap.add_argument("--preload", default="all",
+                    help="comma-separated voice ids to load at start, or 'all' for every "
+                         "installed voice (the default). Naming voices here would make the "
+                         "unit file a second place to edit when one is added or removed; the "
+                         "voices directory is the configuration.")
     a = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -135,9 +139,11 @@ def main():
     log.info("piper tts on %s:%d — %d voices in %s", a.listen, a.port, len(vs), VOICE_DIR)
     for v in vs:
         log.info("  %s  (%s, %s)", v["id"], v["lang"], v["quality"])
-    for vid in filter(None, a.preload.split(",")):
+    wanted = [v["id"] for v in vs] if a.preload.strip() == "all" \
+        else [x.strip() for x in a.preload.split(",") if x.strip()]
+    for vid in wanted:
         try:
-            get_voice(vid.strip())
+            get_voice(vid)
         except Exception as e:  # noqa: BLE001
             log.warning("preload %s failed: %s", vid, e)
     ThreadingHTTPServer((a.listen, a.port), Handler).serve_forever()

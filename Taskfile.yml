@@ -40,10 +40,10 @@ tasks:
       - '{{.VENV}}/bin/pip install -q piper-tts'
 
   voices:
-    desc: "Download Piper voices (VOICE=en_US-lessac-medium by default)"
+    desc: "Download Piper voices (VOICE='...' to override the starter set)"
     deps: [venv]
     vars:
-      VOICE: '{{.VOICE | default "en_US-lessac-medium"}}'
+      VOICE: '{{.VOICE | default "en_US-ryan-high en_GB-alba-medium"}}'
     cmds:
       - '{{.VENV}}/bin/python -m piper.download_voices {{.VOICE}} --data-dir voices'
       - ls -la voices/
