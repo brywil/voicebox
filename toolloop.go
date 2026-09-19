@@ -80,6 +80,11 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 	wantTools, _ := raw["voicebox_tools"].(bool)
 	delete(raw, "voicebox_tools") // ours, not the model's
 	if !wantTools || h.mcp == nil {
+		// Logged explicitly: "the model says it has no tools" has two very
+		// different causes -- the client never asked, or it asked and the model
+		// ignored them -- and without this line they look identical from here.
+		log.Printf("[tools] chat on %s WITHOUT tools (client asked=%v, server configured=%v)",
+			backendID, wantTools, h.mcp != nil)
 		h.proxyChat(w, r, b, body)
 		return
 	}
@@ -91,6 +96,7 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw["tools"] = OpenAITools(tools)
+	log.Printf("[tools] chat on %s WITH %d tools offered", backendID, len(tools))
 
 	msgs, _ := raw["messages"].([]any)
 	messages := make([]map[string]any, 0, len(msgs))

@@ -1417,7 +1417,11 @@ ttsEngineEl.addEventListener("change", updateCrumb);
  try {
   await loadBackends();
 
-  $("useTools").checked = SERVER_TOOLS && localStorage.getItem("vb.tools") === "1";
+  // Default ON when a tool server is configured. Configuring one IS the opt-in;
+  // making it off-by-default meant the tools were set up, reachable and working
+  // while the model went on saying it had none, with nothing on screen to
+  // suggest why. An explicit "0" still turns it off and is remembered.
+  $("useTools").checked = SERVER_TOOLS && localStorage.getItem("vb.tools") !== "0";
   $("useTools").onchange = () => {
     localStorage.setItem("vb.tools", $("useTools").checked ? "1" : "0");
     updateCrumb();
