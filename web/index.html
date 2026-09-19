@@ -220,6 +220,9 @@
       <option value="kokoro">Kokoro (in-browser)</option>
     </select></label>
     <label class="row"><span>Voice</span><select id="voice"></select></label>
+    <label class="row" id="speakerRow" style="display:none"><span>Speaker</span>
+      <span class="rate"><input type="range" id="speaker" min="0" max="0" step="1" value="0" />
+      <span id="speakerVal">0</span></span></label>
     <label class="row"><span>Speed</span>
       <span class="rate"><input type="range" id="rate" min="0.5" max="2.5" step="0.05" value="1" />
       <span id="rateVal">1.00x</span></span></label>
@@ -277,6 +280,24 @@ const logEl = $("log"), statusEl = $("status");
 const backendEl = $("backend"), modelEl = $("model"), voiceEl = $("voice");
 const sttEngineEl = $("sttEngine"), effortEl = $("effort");
 const thinkVoiceEl = $("thinkVoice"), shushBtn = $("shush");
+const speakerEl = $("speaker"), speakerRow = $("speakerRow"), speakerVal = $("speakerVal");
+
+// Multi-speaker voices: en_US-libritts-high ships 904 of them in one file, and
+// without this the service renders speaker 0 forever -- 903 voices on disk that
+// nothing can reach. Shown only for a voice that actually has more than one.
+function syncSpeakerRange() {
+  const v = (piperVoices || []).find((x) => x.id === voiceEl.value);
+  const n = (v && v.speakers) || 1;
+  speakerRow.style.display = n > 1 ? "" : "none";
+  speakerEl.max = String(n - 1);
+  const saved = parseInt(localStorage.getItem("vb.speaker." + voiceEl.value) || "0", 10);
+  speakerEl.value = String(Math.min(Math.max(0, saved), n - 1));
+  speakerVal.textContent = speakerEl.value + " / " + (n - 1);
+}
+speakerEl.oninput = () => {
+  speakerVal.textContent = speakerEl.value + " / " + speakerEl.max;
+  localStorage.setItem("vb.speaker." + voiceEl.value, speakerEl.value);
+};
 
 // --- settings panel ----------------------------------------------------------
 const panel = $("panel"), scrim = $("scrim");
@@ -665,7 +686,11 @@ async function loadKokoroVoices() {
 }
 
 speechSynthesis.onvoiceschanged = () => { if (ttsEngineEl.value === "system") loadSystemVoices(); };
-voiceEl.onchange = () => { localStorage.setItem("vb.voice." + ttsEngineEl.value, voiceEl.value); updateCrumb(); };
+voiceEl.onchange = () => {
+  localStorage.setItem("vb.voice." + ttsEngineEl.value, voiceEl.value);
+  if (ttsEngineEl.value === "piper") syncSpeakerRange();
+  updateCrumb();
+};
 ttsEngineEl.onchange = async () => {
   localStorage.setItem("vb.tts", ttsEngineEl.value);
   stopSpeaking();
@@ -691,13 +716,15 @@ async function loadPiperVoices() {
     for (const v of piperVoices) {
       const o = document.createElement("option");
       o.value = v.id;
-      o.textContent = `${v.name} · ${v.lang.replace("_", "-")} · ${v.quality}`;
+      o.textContent = `${v.name} · ${v.lang.replace("_", "-")} · ${v.quality}` +
+        (v.speakers > 1 ? ` · ${v.speakers} voices` : "");
       o.title = v.id;
       voiceEl.appendChild(o);
     }
     const saved = localStorage.getItem("vb.voice.piper");
     if (saved && piperVoices.some((v) => v.id === saved)) voiceEl.value = saved;
     syncThinkVoices();
+    syncSpeakerRange();
     updateCrumb();
     status(`Piper ready — ${piperVoices.length} voices, on the server`);
   } catch (e) {
@@ -726,6 +753,8 @@ async function speakPiper(text, role = "reply") {
       voice: aside ? (thinkVoiceEl.value || voiceEl.value) : voiceEl.value,
       rate: rate() * (aside ? 1.15 : 1),
       volume: aside ? 0.65 : 1.0,
+      ...(speakerRow.style.display !== "none" && !aside
+        ? { speaker: parseInt(speakerEl.value, 10) } : {}),
     }),
   });
   if (!r.ok) throw new Error(`tts HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);

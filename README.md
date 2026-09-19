@@ -269,6 +269,23 @@ slower than playback. Piper needs no GPU at all — measured on this box it does
 for llama-server. It is also the only engine that will work from a phone, since
 the phone would have to download and run the model otherwise.
 
+**Multi-speaker voices.** `en_US-libritts-high` ships **904 speakers in one
+file**, and a service that never sends `speaker_id` renders speaker 0 forever —
+903 voices on disk nothing can reach. `/voices` reports a `speakers` count and
+`/tts` takes a `speaker` index; the panel shows a speaker slider only for a voice
+that has more than one. An out-of-range index is a 400 naming the valid range,
+not a 500.
+
+`/tts` also accepts `noise_w` (phoneme-duration jitter) and `noise_scale`. Every
+voice here ships `noise_w 0.8`, and low jitter is what reads as *robotic* — flat,
+metronomic timing. Exposed rather than tuned, because naturalness is a listening
+judgement. Measured reaching the synthesiser: the same sentence at `noise_w`
+0.0 / 0.8 / 1.6 renders 2.229 s / 2.426 s / 2.786 s.
+
+**Quality tier is not naturalness.** `-high` versus `-medium` is model size and
+sample rate, not how human a voice sounds — Bryan prefers `en_GB-alba-medium` to
+several `-high` models. Download and listen; do not assume the tier.
+
 Voices are loaded once and kept: the first request for a voice pays ~2s, every
 one after is ~0.2s for a short sentence. Add more with
 
