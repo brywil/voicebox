@@ -55,6 +55,30 @@ var templateKnobs = []effortKnob{
 
 var effortLevels = []string{"low", "medium", "high"}
 
+// effortVocab is the vocabulary a template might accept, cheapest first. Which
+// of these a given model actually takes is read OUT of its chat template rather
+// than assumed -- assuming low/medium/high cost Ornith-1.5 its "none", so a
+// model that reasons for three thousand characters on a one-line question had no
+// off switch, despite its template having one.
+var effortVocab = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+
+// levelsFromTemplate returns the vocabulary words the template actually quotes.
+// Returns nil when it cannot tell, so the caller keeps its default.
+func levelsFromTemplate(tmpl string) []string {
+	var out []string
+	for _, v := range effortVocab {
+		if strings.Contains(tmpl, "'"+v+"'") || strings.Contains(tmpl, `"`+v+`"`) {
+			out = append(out, v)
+		}
+	}
+	// One word is not a vocabulary -- it is a coincidence, most likely the
+	// template's own default appearing in an unrelated line.
+	if len(out) < 2 {
+		return nil
+	}
+	return out
+}
+
 func detectEffort(b *Backend, model string) effortKnob {
 	none := effortKnob{Kind: "none", Source: "no reasoning control found"}
 	cl := &http.Client{Timeout: 8 * time.Second}
@@ -72,6 +96,15 @@ func detectEffort(b *Backend, model string) effortKnob {
 				if strings.Contains(tmpl, k.Variable) {
 					k.Kind = "chat_template_kwargs"
 					k.Source = "found " + k.Variable + " in the chat template"
+					// Boolean knobs have their vocabulary already; word-valued
+					// ones get theirs from the template, which is the only place
+					// the real answer lives.
+					if len(k.Levels) != 2 || k.Levels[0] != "false" {
+						if lv := levelsFromTemplate(tmpl); lv != nil {
+							k.Levels, k.Labels = lv, lv
+							k.Source += " (levels read from the template)"
+						}
+					}
 					return k
 				}
 			}

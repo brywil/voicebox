@@ -337,7 +337,15 @@ that model actually honours. Three answers, most direct first:
 
 Families spell it differently — Muse-Glimmer `reasoning_strength`, gpt-oss
 `reasoning_effort`, Qwen3 a boolean `enable_thinking` — and most models have no
-such knob, so a fixed list would be wrong more often than right. The control is
+such knob, so a fixed list would be wrong more often than right.
+
+**The levels are read from the template too, not assumed.** Hardcoding
+low/medium/high cost Ornith-1.5 its `none`: that template accepts `none`, `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh` and more, and the `none` branch sets
+`_initial_thinking = false` — a genuine off switch. A model that spends three
+thousand characters deliberating over a one-line question had no way to stop it.
+Measured after the fix: `none` gives 0 reasoning chars and 4 completion tokens
+against `high`'s 15 and 19, for the same correct answer. The control is
 hidden entirely when nothing is supported, and re-asked whenever the model
 changes, because the capability belongs to the weights rather than the server.
 
