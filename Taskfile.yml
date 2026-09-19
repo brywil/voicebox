@@ -84,7 +84,7 @@ tasks:
     desc: "Check, build, restart both services, verify they answer"
     cmds:
       - task: check
-      - task: build
+      - task: install
       - '{{.SC}} restart voicebox-tts || true'
       - '{{.SC}} restart voicebox'
       - sleep 3
@@ -124,4 +124,5 @@ tasks:
   clean:
     desc: "Remove build artifacts"
     cmds:
-      - rm -rf {{.BUILD_DIR}} {{.BINARY}}
+      - cmd: 'case "{{.BUILD_DIR}}" in ""|"."|"/"|".."|"~") echo "refusing to clean BUILD_DIR={{.BUILD_DIR}}"; exit 1;; esac'
+      - cmd: 'rm -rf ./{{.BUILD_DIR}}'
