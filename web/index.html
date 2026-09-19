@@ -2,7 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- interactive-widget=resizes-content is the whole fix for the on-screen
+     keyboard. The default, resizes-visual, shrinks only the VISUAL viewport:
+     100dvh stays full-screen-height, the keyboard covers the bottom, and the
+     browser scrolls the entire page up to reveal the focused input -- taking the
+     header and the conversation with it. resizes-content shrinks the layout
+     viewport instead, so the flex column simply re-lays out around the keyboard
+     and nothing scrolls away. -->
+<meta name="viewport"
+      content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
 <title>voicebox</title>
 <style>
   :root {
@@ -16,6 +24,9 @@
   body {
     background: var(--bg); color: var(--text); height: 100dvh; display: flex; flex-direction: column;
     font: 15px/1.55 system-ui, -apple-system, sans-serif;
+    /* The page itself never scrolls; only #log does. Without this a long
+       conversation scrolls the header and footer away instead of the history. */
+    overflow: hidden;
   }
   header {
     display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
@@ -67,18 +78,28 @@
   button:disabled { opacity: .45; cursor: default; }
   label.chk { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--muted); }
   input[type=range] { accent-color: var(--accent); padding: 0; }
-  #log { flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 14px; }
+  /* min-height:0 is load-bearing: a flex item defaults to min-height:auto and
+     will not shrink below its content, so without it a long conversation grows
+     the log and pushes the footer off the bottom of the screen rather than
+     scrolling inside it. */
+  #log {
+    flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    padding: 18px 16px; display: flex; flex-direction: column; gap: 14px;
+  }
   .msg { max-width: 780px; width: 100%; margin: 0 auto; display: flex; gap: 10px; }
   .who {
     flex: 0 0 52px; font: 600 11px/1.8 var(--mono); letter-spacing: .08em;
     text-transform: uppercase; color: var(--muted); padding-top: 2px;
   }
   .msg.you .who { color: var(--accent); }
-  .body { flex: 1; white-space: pre-wrap; word-wrap: break-word; }
+  .col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .body { white-space: pre-wrap; word-wrap: break-word; min-width: 0; }
   .body.partial { color: var(--muted); font-style: italic; }
   .think {
     border-left: 2px solid var(--edge); padding: 4px 0 4px 10px; margin-bottom: 8px;
-    color: var(--muted); font-size: 13px; white-space: pre-wrap; max-height: 8.5em; overflow-y: auto;
+    color: var(--muted); font-size: 13px; white-space: pre-wrap;
+    max-height: 8.5em; overflow-y: auto; overscroll-behavior: contain;
+    width: 100%; min-width: 0;
   }
   .think summary { cursor: pointer; color: var(--muted); font-size: 12px; font-family: var(--mono); }
   .tool {
@@ -329,7 +350,13 @@ function status(msg, kind = "") { statusEl.textContent = msg; statusEl.className
 function addMsg(who, text, cls = "") {
   const row = document.createElement("div");
   row.className = "msg " + (who === "you" ? "you" : "");
-  row.innerHTML = `<div class="who">${who}</div><div class="body ${cls}"></div>`;
+  // .col exists so that everything attached to a turn -- thinking, tool lines,
+  // the reply -- stacks VERTICALLY. They are inserted with
+  // out.parentNode.insertBefore, and without this wrapper that parent is the
+  // flex ROW, which laid the thinking block out beside the reply and squeezed
+  // both into narrow columns on a phone.
+  row.innerHTML = `<div class="who">${who}</div>` +
+                  `<div class="col"><div class="body ${cls}"></div></div>`;
   row.querySelector(".body").textContent = text;
   logEl.appendChild(row);
   logEl.scrollTop = logEl.scrollHeight;
@@ -737,6 +764,27 @@ document.addEventListener("keydown", (e) => {
 // Sentences are spoken in order. Kokoro generation is async and a later
 // sentence can finish first, so a queue rather than fire-and-forget.
 let ttsQueue = [], ttsPlaying = false;
+
+// Keep the newest message visible when the viewport changes size -- the keyboard
+// opening or closing, or the device rotating. Re-pinned only if the user was
+// already at the bottom: yanking the view down while they are reading back
+// through the conversation would be worse than the problem being fixed.
+function pinLogIfAtBottom() {
+  const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
+  return () => { if (nearBottom) logEl.scrollTop = logEl.scrollHeight; };
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    const repin = pinLogIfAtBottom();
+    // After the browser has finished re-laying out, not during.
+    requestAnimationFrame(() => requestAnimationFrame(repin));
+  });
+}
+// Focusing the field is the moment the keyboard appears on a phone.
+textEl.addEventListener("focus", () => {
+  const repin = pinLogIfAtBottom();
+  setTimeout(repin, 300);
+});
 
 function setSpeaking(on) {
   shushBtn.disabled = !on;
