@@ -974,7 +974,13 @@ async function send(userText, source = "typed") {
   // Reasoning models (most of what ollama cloud serves) stream a separate
   // `reasoning` field. It is shown, collapsed, but NEVER spoken -- listening to
   // a model deliberate for thirty seconds before it answers is unusable.
-  let thinkEl = null;
+  // One thinking block PER ROUND, not per turn. Merging them put the model's
+  // post-tool reasoning into a block positioned ABOVE the tool line that caused
+  // it, which reads as the tool result arriving after the turn rather than
+  // between rounds. curThink is cleared by each tool event so the next
+  // reasoning delta opens a fresh block below it.
+  curThink = null;
+  thinking = "";
   let full = "", thinking = "";
   try {
     const r = await fetch("/v1/chat/completions", {
@@ -1021,14 +1027,15 @@ async function send(userText, source = "typed") {
             const delta = j.choices?.[0]?.delta || {};
             const think = delta.reasoning ?? delta.reasoning_content;
             if (think) {
-              thinking += think;
-              if (!thinkEl) {
-                thinkEl = document.createElement("details");
-                thinkEl.className = "think";
-                thinkEl.innerHTML = "<summary>thinking…</summary><div></div>";
-                out.parentNode.insertBefore(thinkEl, out);
+              if (!curThink) {
+                curThink = document.createElement("details");
+                curThink.className = "think";
+                curThink.innerHTML = "<summary>thinking…</summary><div></div>";
+                out.parentNode.insertBefore(curThink, out);
+                thinking = "";        // this block's text, not the turn's
               }
-              thinkEl.querySelector("div").textContent = thinking;
+              thinking += think;
+              curThink.querySelector("div").textContent = thinking;
               speakThinkingStream(think);
               logEl.scrollTop = logEl.scrollHeight;
             }
@@ -1041,7 +1048,7 @@ async function send(userText, source = "typed") {
               if (full.length < 40) full = stripTag(full);   // only ever a prefix
               out.textContent = full;
               out.className = "body";
-              if (thinkEl) thinkEl.querySelector("summary").textContent =
+              if (curThink) curThink.querySelector("summary").textContent =
                 `thought for ${thinking.length} chars`;
               logEl.scrollTop = logEl.scrollHeight;
               speakStreaming(d);   // content only -- reasoning is never spoken
@@ -1254,6 +1261,8 @@ const TOOL_SAYS = {
 };
 
 const toolLines = new Map();   // name -> the element showing its progress
+let curThink = null;           // the reasoning block for the CURRENT round
+let thinking = "";             // that block's accumulated text
 
 function handleToolEvent(ev, out) {
   if (ev.error) {
@@ -1286,6 +1295,14 @@ function handleToolEvent(ev, out) {
   }
   const t = ev.tool;
   if (!t) return;
+
+  // A tool call ends the current round's reasoning. Closing the block here is
+  // what keeps the display in the order things actually happened:
+  // think -> tool -> think -> answer.
+  if (curThink) {
+    curThink.querySelector("summary").textContent = `thought for ${thinking.length} chars`;
+    curThink = null;
+  }
 
   if (t.phase === "start") {
     const el = document.createElement("div");
