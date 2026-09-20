@@ -6,6 +6,8 @@ Wants=network-online.target goclaw-chromium.service
 
 [Service]
 Type=simple
+EnvironmentFile=%h/.config/mymcp/mymcp.env
+Environment=MYMCP_ALLOW_REMOTE=false
 ExecStart=/home/bryan/.local/bin/mymcp serve \
   --addr 127.0.0.1:9445 \
   --workspace %h/.local/share/voicebox/scratch \
