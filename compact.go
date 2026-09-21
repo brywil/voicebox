@@ -283,7 +283,7 @@ func (h *voicebox) maybeCompact(id, backendID, model string) {
 	if err != nil {
 		return
 	}
-	ctxTokens := h.compactContext(backendID)
+	ctxTokens := h.compactContext(backendID, model)
 	if ctxTokens <= 0 {
 		return // no window known for this backend; never guess one
 	}
@@ -308,7 +308,7 @@ func (h *voicebox) sweepCompactable() {
 		if err != nil {
 			continue
 		}
-		ctxTokens := h.compactContext(sess.Backend)
+		ctxTokens := h.compactContext(sess.Backend, sess.Model)
 		if ctxTokens <= 0 {
 			continue
 		}
@@ -336,8 +336,8 @@ func (h *voicebox) StartCompactSweeper() {
 // compactContext is the window to plan against: configured if set, otherwise probed live from
 // the backend (llama.cpp reports its per-slot context on /props). Zero means unknown, which
 // leaves compaction off rather than guessing.
-func (h *voicebox) compactContext(backendID string) int {
-	return h.contextFor(h.cfg.find(orDefault(backendID, h.cfg.Default)))
+func (h *voicebox) compactContext(backendID, model string) int {
+	return h.contextFor(h.cfg.find(orDefault(backendID, h.cfg.Default)), model)
 }
 
 func (h *voicebox) softFrac(backendID string) float64 {

@@ -296,47 +296,114 @@ func TestCompactFractionsHonourConfig(t *testing.T) {
 func TestUnknownContextDisablesCompaction(t *testing.T) {
 	h := &voicebox{cfg: &Config{Default: "b", Backends: []*Backend{
 		{ID: "b", URL: "http://127.0.0.1:1"}}}} // nothing listening
-	if got := h.compactContext("b"); got != 0 {
+	if got := h.compactContext("b", ""); got != 0 {
 		t.Errorf("compactContext on an unreachable backend = %d, want 0", got)
+	}
+}
+
+// The probe ladder must read the SERVING window and never the architectural maximum.
+// meta.n_ctx and meta.n_ctx_train sit side by side in /v1/models; taking the wrong one
+// overstates by 32x here, so the budget is never reached, compaction never fires, and the
+// backend silently truncates -- the exact failure compaction exists to prevent.
+func TestProbePrefersServingContextOverTrainingContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{
+				"id": "m1", "meta": map[string]any{"n_ctx": 4096, "n_ctx_train": 131072}}}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	b := &Backend{ID: "t", URL: srv.URL}
+	n, via := probeContextFor(b, "m1")
+	if n != 4096 {
+		t.Errorf("probe = %d via %q; want 4096 (n_ctx), NOT 131072 (n_ctx_train)", n, via)
 	}
 }
 
 // /props lives at the ROOT. A backend URL points at the OpenAI-compatible surface, so a naive
 // base+"/props" becomes ".../v1/props" and 404s -- and the resulting 0 silently disables
 // compaction rather than erroring.
-func TestProbeContextStripsV1Suffix(t *testing.T) {
-	var gotPath string
+func TestProbeFallsBackToPropsAtRoot(t *testing.T) {
+	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		json.NewEncoder(w).Encode(map[string]any{
-			"default_generation_settings": map[string]any{"n_ctx": 2048},
-			"total_slots":                 4,
-		})
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/props" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"default_generation_settings": map[string]any{"n_ctx": 2048},
+				"total_slots":                 4})
+			return
+		}
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-
-	if n := probeContext(srv.URL + "/v1"); n != 2048 {
-		t.Errorf("probeContext = %d, want 2048 (path hit was %q)", n, gotPath)
+	// URL ends in /v1, as a backend pointed at the OpenAI surface would.
+	n, _ := probeContextFor(&Backend{ID: "t", URL: srv.URL + "/v1"}, "")
+	if n != 2048 {
+		t.Errorf("probe = %d, want 2048 from /props (paths tried: %v)", n, paths)
 	}
-	if gotPath != "/props" {
-		t.Errorf("probed %q, want /props at the root", gotPath)
+	var sawRoot bool
+	for _, p := range paths {
+		if p == "/props" {
+			sawRoot = true
+		}
+		if p == "/v1/props" {
+			t.Error("probed /v1/props, which 404s; the /v1 suffix must be stripped")
+		}
+	}
+	if !sawRoot {
+		t.Errorf("never probed /props at the root; tried %v", paths)
 	}
 }
 
-// MEASURED on llama-server: --ctx-size 8192 --parallel 4 reports
-// default_generation_settings.n_ctx = 2048, i.e. ALREADY divided per slot. Dividing again by
-// total_slots would give 512 and compact four times too aggressively -- and over-compaction is
-// silent, it just looks like a model with a poor memory.
-func TestProbeContextDoesNotDivideBySlotsAgain(t *testing.T) {
+// MEASURED on llama-server: --ctx-size 8192 --parallel 4 reports n_ctx = 2048, i.e. ALREADY
+// divided per slot. Dividing again by total_slots would give 512 and compact four times too
+// aggressively -- and over-compaction is silent, it just looks like a poor memory.
+func TestProbeDoesNotDivideBySlotsAgain(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"default_generation_settings": map[string]any{"n_ctx": 2048},
-			"total_slots":                 4,
-		})
+		if r.URL.Path == "/props" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"default_generation_settings": map[string]any{"n_ctx": 2048},
+				"total_slots":                 4})
+			return
+		}
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	if n := probeContext(srv.URL); n != 2048 {
-		t.Errorf("probeContext = %d, want 2048 per-slot value used as-is", n)
+	if n, _ := probeContextFor(&Backend{ID: "t", URL: srv.URL}, ""); n != 2048 {
+		t.Errorf("probe = %d, want the per-slot 2048 used as-is", n)
+	}
+}
+
+// ollama: /api/ps reports the LOADED context. /api/show reports the model's maximum and must
+// not be used -- for gemma4 that is 262144 against a far smaller served window.
+func TestProbeUsesOllamaLoadedContextNotModelMaximum(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{
+				"name": "gemma4:31b", "model": "gemma4:31b", "context_length": 8192}}})
+		case "/api/show":
+			t.Error("probe called /api/show, which reports the architectural maximum")
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	n, via := probeContextFor(&Backend{ID: "o", URL: srv.URL}, "gemma4:31b")
+	if n != 8192 {
+		t.Errorf("probe = %d via %q, want 8192 from /api/ps", n, via)
+	}
+}
+
+// Nothing will say: compaction must stay OFF rather than plan against a guess.
+func TestProbeReturnsZeroWhenNothingReports(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	if n, _ := probeContextFor(&Backend{ID: "t", URL: srv.URL}, ""); n != 0 {
+		t.Errorf("probe = %d, want 0 (unknown) so compaction stays disabled", n)
 	}
 }
 
