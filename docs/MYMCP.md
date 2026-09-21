@@ -182,3 +182,55 @@ So the procedure is:
 If this bites again, the cheap fix is to invalidate on a failed call: a `tools/call` that comes
 back "unknown tool" is exactly the signal that the cached catalog is stale, and re-listing once
 before giving up costs one round trip on a path that was already failing.
+
+## The front door: mTLS, and what that changed
+
+2026-09-21. voicebox listened on `:8080` across the whole LAN with no authentication, which is
+the fact that made every capability question hard: any device on the network could drive the
+model, so each new tool had to be safe in the hands of a stranger.
+
+Now: voicebox binds **127.0.0.1:8080** and `truemtls` (github.com/brywil/truemtls) fronts it on
+`0.0.0.0:8443` with mandatory mutual TLS. Demonstrated rather than asserted:
+
+    no certificate                  -> tlsv13 alert certificate required (alert 116)
+    a DIFFERENT valid self-signed   -> sslv3 alert bad certificate, queued as pending
+    the pinned certificate          -> HTTP 200
+    plain :8080 from the LAN        -> refused
+
+Not "requires a cert" — requires THAT leaf. The imposter landed in the pending queue for
+review instead of being trusted, which is the TOFU model working as designed.
+
+Two consequences worth knowing:
+
+**The LAN path is now a secure context**, so the microphone works from another machine's
+browser. Previously only `localhost` or the tailscale `ts.net` URL qualified, which is why the
+server log has always printed that warning at boot.
+
+**The tailnet path is untouched** — `tailscale serve` proxies to `127.0.0.1:8080` on this host,
+so the phone keeps working without a client certificate.
+
+`--listen 127.0.0.1:8080` lives in `config.json`, which is **gitignored**. The tracked
+`config.example.json` now carries the same value so a fresh checkout does not silently
+reopen the LAN.
+
+Enrolling more devices: connect once, then `truemtls trust pin <fp>`. Set
+`EXTRA_FLAGS=--approval-page` in `~/.config/truemtls/truemtls.env` while doing it — an
+unapproved client then gets a 403 page instead of a handshake rejection, which in a browser is
+an error with nothing actionable in it.
+
+## Workspace widened to the home directory
+
+`--workspace %h`, matching goclaw's instance. The read-only file tools now see everything the
+user can see, rather than one scratch directory.
+
+**This creates an exfiltration path that did not exist before, and it is worth stating
+plainly.** `web_fetch` can reach arbitrary URLs, and the file tools can now read `~/.ssh`,
+tokens and credentials. Content fetched from the web arrives in the model's context as text,
+so a page that carries instructions can attempt to talk the model into reading a secret and
+then fetching a URL containing it. mTLS does not help here: the attack rides in on a page the
+legitimate user asked for. goclaw has carried the same exposure for longer, with a shell on
+top of it.
+
+Accepted knowingly. If it stops being acceptable the lever is not the workspace but the pair —
+either deny-list the sensitive paths in mymcp's fs tools, or stop `web_fetch` reaching hosts
+that were not the subject of the request.
