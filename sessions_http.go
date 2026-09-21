@@ -74,6 +74,11 @@ func (h *voicebox) registerSessionRoutes(mux *http.ServeMux) {
 		writeJSON(w, map[string]any{
 			"id": sess.ID, "title": sess.Title, "created": sess.Created,
 			"updated": sess.Updated, "head": head, "total": len(sess.Messages),
+			// summary/compacted_through are the contract for building context: a client
+			// sends the summary in place of every message at or below compacted_through,
+			// then the turns after it verbatim. Without both it cannot tell which turns the
+			// summary already covers and would send them twice.
+			"summary": sess.Summary, "compacted_through": sess.CompactedThrough,
 			"messages": msgs,
 			// truncated tells the client it is looking at a window rather than the whole
 			// conversation, so it can offer "load earlier" instead of silently implying
@@ -103,6 +108,32 @@ func (h *voicebox) registerSessionRoutes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
+	})
+
+	// Manual compaction. Auto-compaction covers normal use; this exists so the behaviour is
+	// testable without waiting for a session to grow, and so a "compact now" control has
+	// something to call.
+	mux.HandleFunc("POST /api/sessions/{id}/compact", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Backend string `json:"backend"`
+			Model   string `json:"model"`
+			Keep    int    `json:"keep"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
+		if body.Keep <= 0 {
+			body.Keep = defaultKeepVerbatim
+		}
+		if err := h.Compact(r.Context(), r.PathValue("id"), body.Backend, body.Model, body.Keep); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		sess, err := h.store.Get(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "summary": sess.Summary,
+			"compacted_through": sess.CompactedThrough})
 	})
 
 	mux.HandleFunc("GET /api/sessions/{id}/events", h.handleSessionEvents)

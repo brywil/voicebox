@@ -43,12 +43,18 @@ type Message struct {
 }
 
 type Session struct {
-	ID       string    `json:"id"`
-	Title    string    `json:"title"`
-	Created  int64     `json:"created"`
-	Updated  int64     `json:"updated"`
-	NextSeq  int64     `json:"next_seq"`
-	Messages []Message `json:"messages"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Created int64  `json:"created"`
+	Updated int64  `json:"updated"`
+	NextSeq int64  `json:"next_seq"`
+	// Summary replaces every message at or below CompactedThrough when a client builds the
+	// context it sends to the model. The messages themselves are NOT removed -- compaction
+	// changes what is sent, never what is kept, so a bad summary can be redone from the
+	// original turns and the record stays readable.
+	Summary          string    `json:"summary,omitempty"`
+	CompactedThrough int64     `json:"compacted_through,omitempty"`
+	Messages         []Message `json:"messages"`
 }
 
 // SessionMeta is what the picker needs: enough to choose, not the transcript.

@@ -29,7 +29,7 @@ import (
 type sessionTee struct {
 	http.ResponseWriter
 	flusher http.Flusher
-	buf     bytes.Buffer  // partial SSE frame across Write boundaries
+	buf     bytes.Buffer // partial SSE frame across Write boundaries
 	text    strings.Builder
 }
 
@@ -133,8 +133,23 @@ func (h *voicebox) withSession(w http.ResponseWriter, r *http.Request, body []by
 		}
 		if _, err := h.store.Append(sid, origin, Message{Role: "assistant", Content: text}); err != nil {
 			log.Printf("[sessions] append assistant turn: %v", err)
+			return
 		}
+		// Checked AFTER the reply has been delivered, and it runs in the background: making
+		// the user wait on a summariser call to finish a turn they already received would be
+		// a visible stall for no benefit.
+		h.maybeCompact(sid, r.Header.Get("X-Voicebox-Backend"), modelOf(body))
 	}
+}
+
+// modelOf reads the model name back out of the request so a background compaction summarises
+// with the same model the conversation is using, rather than whatever the backend defaults to.
+func modelOf(body []byte) string {
+	var req struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(body, &req)
+	return req.Model
 }
 
 // lastUserMessage extracts the final user turn from an OpenAI-format request body.
