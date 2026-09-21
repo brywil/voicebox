@@ -45,9 +45,13 @@ type Backend struct {
 	// actual limit. Zero and unprobeable means compaction stays off for this backend rather
 	// than guessing a window.
 	Context int `json:"context,omitempty"`
-	// CompactAt is the fraction of Context at which compaction triggers. Default 0.6, which
-	// leaves room for the reply plus several more turns before it fires again.
+	// CompactAt is the HARD fraction of Context: above this, compact immediately even if the
+	// user is mid-conversation, because overflowing is worse than stalling. Default 0.85.
 	CompactAt float64 `json:"compact_at,omitempty"`
+	// CompactIdleAt is the SOFT fraction: above this, compact as soon as the conversation
+	// goes quiet. Default 0.35. Deliberately far below CompactAt -- a wide band gives many
+	// idle moments to compact for free before the hard limit forces it into the user's way.
+	CompactIdleAt float64 `json:"compact_idle_at,omitempty"`
 
 	target *url.URL
 	proxy  *httputil.ReverseProxy
@@ -121,6 +125,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	vb.registerSessionRoutes(mux)
+	vb.StartCompactSweeper()
 
 	// The browser asks which backends exist. Keys are deliberately absent from
 	// this payload -- it reports only whether one is CONFIGURED, so the UI can

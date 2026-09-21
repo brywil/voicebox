@@ -111,6 +111,9 @@ func (h *voicebox) withSession(w http.ResponseWriter, r *http.Request, body []by
 		return w, func() {}
 	}
 	origin := r.Header.Get("X-Voicebox-Client")
+	// Recorded so the idle sweeper, which runs outside any request, summarises with the same
+	// model this conversation is using rather than the server default.
+	h.store.SetRoute(sid, r.Header.Get("X-Voicebox-Backend"), modelOf(body))
 
 	// Persist only the LAST user message. The request carries the whole history, but the
 	// earlier turns are already stored -- appending them again would duplicate the entire

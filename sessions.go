@@ -52,9 +52,16 @@ type Session struct {
 	// context it sends to the model. The messages themselves are NOT removed -- compaction
 	// changes what is sent, never what is kept, so a bad summary can be redone from the
 	// original turns and the record stays readable.
-	Summary          string    `json:"summary,omitempty"`
-	CompactedThrough int64     `json:"compacted_through,omitempty"`
-	Messages         []Message `json:"messages"`
+	Summary          string `json:"summary,omitempty"`
+	CompactedThrough int64  `json:"compacted_through,omitempty"`
+	// Backend and Model record what this conversation is being run with, so the idle sweeper
+	// can summarise with the SAME model the conversation uses. The sweeper fires outside any
+	// request and would otherwise have nothing to go on but the server default -- which on a
+	// multi-backend setup means summarising a cloud conversation with a local model, or vice
+	// versa.
+	Backend  string    `json:"backend,omitempty"`
+	Model    string    `json:"model,omitempty"`
+	Messages []Message `json:"messages"`
 }
 
 // SessionMeta is what the picker needs: enough to choose, not the transcript.
@@ -75,11 +82,24 @@ type SessionMeta struct {
 type Event struct {
 	Session string `json:"session"`
 	Origin  string `json:"origin"`
-	// Kind is "commit" today: whole turns that are already persisted and carry sequence
-	// numbers. It exists so that streaming partial tokens to other devices can be added later
-	// as kind:"delta" WITHOUT breaking clients -- a delta has no seq yet (seq is assigned at
-	// commit), so it cannot share the commit path, and a client that does not understand
-	// deltas can ignore them and still be correct.
+	// Kind distinguishes what happened:
+	//
+	//   commit         whole turns, persisted, carrying sequence numbers
+	//   compacting     a summariser call has STARTED -- no state change yet
+	//   compact        it finished; re-read summary and compacted_through
+	//   compact_failed it did not finish; nothing changed
+	//
+	// The compacting/compact pair exists because compaction is not invisible to the user.
+	// It runs after the reply so it never delays the turn that triggered it, but it OCCUPIES A
+	// SLOT on the backend -- and on a single-slot llama-server (--parallel 1) the user's next
+	// turn queues behind the summariser with no explanation. Unannounced, that is
+	// indistinguishable from the model hanging. compact_failed exists so a client that showed
+	// "compacting" has something to clear it with; without it a failed summary leaves the
+	// indicator stuck on forever.
+	//
+	// Leaving room for kind:"delta" later, to relay partial tokens to other devices: a delta
+	// has no seq (seq is assigned at commit) so it cannot share the commit path, and a client
+	// that does not understand one can ignore it and still be correct.
 	Kind string    `json:"kind"`
 	Msgs []Message `json:"msgs"`
 }
@@ -235,6 +255,23 @@ func (s *Store) Rename(id, title string) error {
 // stale view silently delete a turn another device had just added. Appending lets two devices
 // interleave instead. (It does not stop a stale device sending stale CONTEXT to the model --
 // that is inherent to picking up a conversation elsewhere -- but it does stop data loss.)
+// SetRoute records which backend and model a session is using. Called on each turn because it
+// can change mid-conversation -- the picker lets you switch.
+func (s *Store) SetRoute(id, backend, model string) {
+	if backend == "" && model == "" {
+		return
+	}
+	m := s.lockFor(id)
+	m.Lock()
+	defer m.Unlock()
+	sess, err := s.Get(id)
+	if err != nil || (sess.Backend == backend && sess.Model == model) {
+		return
+	}
+	sess.Backend, sess.Model = backend, model
+	_ = s.write(sess)
+}
+
 func (s *Store) Append(id, origin string, msgs ...Message) ([]Message, error) {
 	if len(msgs) == 0 {
 		return nil, nil
@@ -334,6 +371,9 @@ func (s *Store) Subscribe(id string) (<-chan Event, func()) {
 		close(ch)
 	}
 }
+
+// Notify sends a message-less event (compaction lifecycle) to a session's watchers.
+func (s *Store) Notify(id, kind string) { s.broadcast(Event{Session: id, Kind: kind}) }
 
 func (s *Store) broadcast(ev Event) {
 	s.submu.Lock()

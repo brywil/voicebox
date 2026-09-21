@@ -28,6 +28,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -125,6 +126,20 @@ func (h *voicebox) Compact(ctx context.Context, id string, backendID string, mod
 	}
 	through := toSummarise[len(toSummarise)-1].Seq
 
+	// Announced only now, after the decision that there IS something to compact. Announcing
+	// earlier would flash an indicator for the common case where Compact returns immediately
+	// with nothing to do.
+	h.store.Notify(id, "compacting")
+	ok := false
+	defer func() {
+		if !ok {
+			// Every failure path below must clear the indicator, or a client that showed
+			// "compacting" is stuck displaying it. A deferred flag is the only way to catch
+			// all of them without repeating the call at each return.
+			h.store.Notify(id, "compact_failed")
+		}
+	}()
+
 	var sb strings.Builder
 	if sess.Summary != "" {
 		// Fold the previous summary in rather than discarding it, or each compaction would
@@ -193,18 +208,63 @@ func (h *voicebox) Compact(ctx context.Context, id string, backendID string, mod
 	if err := h.store.SetSummary(id, summary, through); err != nil {
 		return err
 	}
+	ok = true
 	after, _ := h.store.Get(id)
 	log.Printf("[compact] %s: %d messages -> summary, ~%d tokens -> ~%d (through seq %d)",
 		id, len(toSummarise), before, after.estTokensFrom(after.CompactedThrough), through)
 	return nil
 }
 
-// maybeCompact runs compaction in the background when a session has grown past its budget.
+// --- WHEN TO COMPACT -------------------------------------------------------------------
 //
-// Asynchronous on purpose: this is triggered just after a reply was delivered, and making the
-// user wait for a summariser call to finish a turn they already received would be a visible
-// stall for no benefit. If it fails, the conversation is merely uncompacted and the next turn
-// tries again.
+// TWO THRESHOLDS, WIDE APART, because compaction is cheap to do early and expensive to do late.
+//
+//   SOFT (default 0.35)  above this, compact as soon as the conversation goes quiet. Most
+//                        compactions should happen here, in a gap while the user is thinking,
+//                        where nothing is waiting on the backend.
+//   HARD (default 0.85)  above this, compact immediately regardless of activity. Overflowing
+//                        the context is worse than a visible stall: the backend silently drops
+//                        the front of the conversation and the model starts contradicting
+//                        things it agreed to, with nothing in any log to explain it.
+//
+// The band is deliberately wide. A narrow band would put the soft threshold close to the hard
+// one and leave few idle moments to catch, which defeats the point -- the whole reason to start
+// early is to have many chances to compact for free before being forced to do it in the user's
+// way. MEASURED on this box: on --parallel 1 a summariser call made a five-token user turn take
+// 5.04 s instead of ~0.3 s, because the turn queued behind it. That stall is what the soft
+// threshold exists to avoid.
+
+const (
+	defaultSoftFrac = 0.35
+	defaultHardFrac = 0.85
+	// defaultIdle is how quiet a conversation must be before an opportunistic compaction runs.
+	// Long enough that a pause for thought is not mistaken for the end of a conversation;
+	// short enough to catch the gap when someone puts the phone down.
+	defaultIdle = 45 * time.Second
+	sweepEvery  = 20 * time.Second
+)
+
+// inFlight stops the sweeper and the request path from compacting the same session at once,
+// which would run two summarisers over the same turns and have the second overwrite the first.
+var inFlight sync.Map // session id -> struct{}
+
+func (h *voicebox) compactOnce(id, backendID, model, why string) {
+	if _, busy := inFlight.LoadOrStore(id, struct{}{}); busy {
+		return
+	}
+	go func() {
+		defer inFlight.Delete(id)
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cancel()
+		if err := h.Compact(ctx, id, backendID, model, defaultKeepVerbatim); err != nil {
+			log.Printf("[compact] %s (%s): %v", id, why, err)
+		}
+	}()
+}
+
+// maybeCompact is the HARD check, on the request path. It runs after the reply has been
+// delivered, so it never delays the turn that triggered it -- but it does not wait for idle
+// either, because at this point the next turn may not fit.
 func (h *voicebox) maybeCompact(id, backendID, model string) {
 	if h.store == nil {
 		return
@@ -213,48 +273,78 @@ func (h *voicebox) maybeCompact(id, backendID, model string) {
 	if err != nil {
 		return
 	}
-	budget := h.compactBudget(backendID)
-	if budget <= 0 {
-		return // no context size known for this backend; never guess one
+	ctxTokens := h.compactContext(backendID)
+	if ctxTokens <= 0 {
+		return // no window known for this backend; never guess one
 	}
-	if sess.estTokensFrom(sess.CompactedThrough) < budget {
+	if sess.estTokensFrom(sess.CompactedThrough) >= int(float64(ctxTokens)*h.hardFrac(backendID)) {
+		h.compactOnce(id, backendID, model, "hard limit")
+	}
+}
+
+// sweepCompactable is the SOFT check: every session that is over the soft threshold AND has
+// been quiet long enough gets compacted opportunistically.
+func (h *voicebox) sweepCompactable() {
+	metas, err := h.store.List()
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, m := range metas {
+		if now.Sub(time.UnixMilli(m.Updated)) < defaultIdle {
+			continue
+		}
+		sess, err := h.store.Get(m.ID)
+		if err != nil {
+			continue
+		}
+		ctxTokens := h.compactContext(sess.Backend)
+		if ctxTokens <= 0 {
+			continue
+		}
+		if sess.estTokensFrom(sess.CompactedThrough) >= int(float64(ctxTokens)*h.softFrac(sess.Backend)) {
+			h.compactOnce(m.ID, sess.Backend, sess.Model, "idle")
+		}
+	}
+}
+
+// StartCompactSweeper runs the opportunistic pass. Started once at boot; a no-op when sessions
+// are disabled.
+func (h *voicebox) StartCompactSweeper() {
+	if h.store == nil {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-		defer cancel()
-		if err := h.Compact(ctx, id, backendID, model, defaultKeepVerbatim); err != nil {
-			log.Printf("[compact] %s: %v", id, err)
+		for range time.Tick(sweepEvery) {
+			h.sweepCompactable()
 		}
 	}()
+	log.Printf("[compact] idle sweeper active (soft %.0f%%, hard %.0f%%, idle %s)",
+		defaultSoftFrac*100, defaultHardFrac*100, defaultIdle)
+}
+
+// compactContext is the window to plan against: configured if set, otherwise probed live from
+// the backend (llama.cpp reports its per-slot context on /props). Zero means unknown, which
+// leaves compaction off rather than guessing.
+func (h *voicebox) compactContext(backendID string) int {
+	return h.contextFor(h.cfg.find(orDefault(backendID, h.cfg.Default)))
+}
+
+func (h *voicebox) softFrac(backendID string) float64 {
+	if b := h.cfg.find(orDefault(backendID, h.cfg.Default)); b != nil && b.CompactIdleAt > 0 && b.CompactIdleAt < 1 {
+		return b.CompactIdleAt
+	}
+	return defaultSoftFrac
+}
+
+func (h *voicebox) hardFrac(backendID string) float64 {
+	if b := h.cfg.find(orDefault(backendID, h.cfg.Default)); b != nil && b.CompactAt > 0 && b.CompactAt < 1 {
+		return b.CompactAt
+	}
+	return defaultHardFrac
 }
 
 // defaultKeepVerbatim is how many recent messages stay uncompressed. Six is roughly three
 // exchanges -- enough that the model still has the exact wording of whatever is currently being
 // worked on, which is the context most expensive to lose.
 const defaultKeepVerbatim = 6
-
-// compactBudget is the token count above which a session is compacted: a fraction of the
-// backend's context, leaving room for the reply itself and for the next few turns before this
-// fires again. Zero means the backend's context is unconfigured and compaction stays off --
-// guessing a context size would mean either compacting conversations that never needed it or
-// failing to compact ones that did.
-func (h *voicebox) compactBudget(backendID string) int {
-	b := h.cfg.find(orDefault(backendID, h.cfg.Default))
-	if b == nil {
-		return 0
-	}
-	// Probed from the live backend when not configured -- llama.cpp reports its per-slot
-	// context on /props, so the window does not have to be maintained by hand and cannot go
-	// stale when the server is restarted with a different -c. Still 0 for backends that do
-	// not report one, which leaves compaction off rather than guessing.
-	ctx := h.contextFor(b)
-	if ctx <= 0 {
-		return 0
-	}
-	frac := b.CompactAt
-	if frac <= 0 || frac >= 1 {
-		frac = 0.6
-	}
-	return int(float64(ctx) * frac)
-}
