@@ -140,3 +140,219 @@ func TestClientJavaScriptParses(t *testing.T) {
 		t.Fatalf("client JavaScript does not parse:\n%s", out)
 	}
 }
+
+// TestClientHasNoUseBeforeDeclaration catches the bug class that broke every message.
+//
+//	curThink = null;
+//	thinking = "";
+//	let full = "", thinking = "";
+//
+// The assignment on the second line precedes the `let` that declares the same name in the same
+// block, which is a temporal dead zone violation: V8 throws "Cannot access 'thinking' before
+// initialization" the moment the line runs. It sat at the top of send(), before the fetch, so
+// every single turn failed and nothing ever reached the server -- the server log was empty,
+// which is what made it look like anything other than a client bug.
+//
+// TestClientJavaScriptParses cannot catch this and never could: the code is syntactically
+// valid, and node exits 0 parsing it. A TDZ violation is a RUNTIME error on a line that a parse
+// never executes. So this walks the script's block scopes instead and reports any name assigned
+// before it is declared in the same scope.
+//
+// The scanner self-checks at the end: it re-inserts the original bad line into a copy and
+// requires that it is found. Without that, a scanner that quietly stops matching anything looks
+// exactly like a clean file.
+func TestClientHasNoUseBeforeDeclaration(t *testing.T) {
+	src := moduleScript(t, clientHTML(t))
+	if bad := useBeforeDeclaration(src); len(bad) > 0 {
+		for _, b := range bad {
+			t.Errorf("%s is assigned before the `let`/`const` that declares it in the same "+
+				"scope: this throws \"Cannot access '%s' before initialization\" at runtime, "+
+				"and the surrounding function stops there", b, b)
+		}
+	}
+
+	// The scanner must actually be able to find one.
+	broken := strings.Replace(src, "  curThink = null;\n  let full",
+		"  curThink = null;\n  thinking = \"\";\n  let full", 1)
+	if broken == src {
+		t.Skip("send()'s preamble has moved; the self-check anchor needs updating")
+	}
+	if got := useBeforeDeclaration(broken); len(got) == 0 {
+		t.Error("the scanner found nothing in a copy with the original bug re-inserted, so a " +
+			"green result here means nothing")
+	}
+}
+
+// moduleScript returns the contents of the page's <script type="module">.
+func moduleScript(t *testing.T, html string) string {
+	t.Helper()
+	const open = `<script type="module">`
+	i := strings.Index(html, open)
+	j := strings.LastIndex(html, "</script>")
+	if i < 0 || j <= i {
+		t.Fatal("could not find the module script in the client")
+	}
+	return html[i+len(open) : j]
+}
+
+// useBeforeDeclaration reports names assigned before their let/const declaration in the SAME
+// block scope. Scopes are identified by their opening brace, so sibling blocks and nested
+// functions are separate and cannot produce a false positive.
+func useBeforeDeclaration(src string) []string {
+	src = blankLiterals(src)
+	type item struct {
+		scope, pos int
+		name       string
+	}
+	var decls, assigns []item
+	stack, next := []int{0}, 1
+
+	ident := func(s string, k int) (string, int) {
+		st := k
+		for k < len(s) && (s[k] == '_' || s[k] == '$' ||
+			s[k] >= 'a' && s[k] <= 'z' || s[k] >= 'A' && s[k] <= 'Z' ||
+			(k > st && s[k] >= '0' && s[k] <= '9')) {
+			k++
+		}
+		return s[st:k], k
+	}
+	isWord := func(s string, k int) bool {
+		if k < 0 || k >= len(s) {
+			return false
+		}
+		c := s[k]
+		return c == '_' || c == '$' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+	}
+
+	for i := 0; i < len(src); i++ {
+		switch {
+		case src[i] == '{':
+			stack = append(stack, next)
+			next++
+		case src[i] == '}':
+			if len(stack) > 1 {
+				stack = stack[:len(stack)-1]
+			}
+		case (strings.HasPrefix(src[i:], "let ") || strings.HasPrefix(src[i:], "const ")) && !isWord(src, i-1):
+			// Every name in the declaration list, so `let a = 1, b = 2` records both.
+			k := i + strings.IndexByte(src[i:], ' ') + 1
+			for k < len(src) && src[k] != ';' && src[k] != '\n' {
+				for k < len(src) && (src[k] == ' ' || src[k] == ',') {
+					k++
+				}
+				name, end := ident(src, k)
+				if name == "" {
+					break
+				}
+				decls = append(decls, item{stack[len(stack)-1], i, name})
+				// Skip this initialiser: its own `name =` is part of the declaration.
+				depth := 0
+				for end < len(src) && (depth > 0 || (src[end] != ',' && src[end] != ';' && src[end] != '\n')) {
+					switch src[end] {
+					case '(', '[', '{':
+						depth++
+					case ')', ']', '}':
+						depth--
+					}
+					end++
+				}
+				k = end
+			}
+			i = k - 1
+		case src[i] == '=' && i+1 < len(src) && src[i+1] != '=' && !isWord(src, i-1):
+			if i > 0 && strings.ContainsRune("=!<>+-*/%&|^", rune(src[i-1])) {
+				continue // comparison or compound assignment handled by the same rule below
+			}
+			k := i - 1
+			for k >= 0 && (src[k] == ' ' || src[k] == '\t') {
+				k--
+			}
+			end := k + 1
+			for k >= 0 && isWord(src, k) {
+				k--
+			}
+			if name := src[k+1 : end]; name != "" && !isWord(src, k) {
+				assigns = append(assigns, item{stack[len(stack)-1], k + 1, name})
+			}
+		}
+	}
+
+	var out []string
+	for _, a := range assigns {
+		for _, d := range decls {
+			if d.scope == a.scope && d.name == a.name && d.pos > a.pos {
+				out = append(out, a.name)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// blankLiterals replaces comments, strings, template literals and regex literals with spaces,
+// keeping every byte offset intact. Without it a brace inside a string or a `let` inside a
+// comment would be read as code and the scope tracking would drift.
+func blankLiterals(s string) string {
+	b := []byte(s)
+	blank := func(from, to int) {
+		for i := from; i < to && i < len(b); i++ {
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+		}
+	}
+	prevCode := func(i int) byte {
+		for i--; i >= 0; i-- {
+			if b[i] != ' ' && b[i] != '\t' && b[i] != '\n' {
+				return b[i]
+			}
+		}
+		return 0
+	}
+	for i := 0; i < len(b); i++ {
+		switch {
+		case b[i] == '/' && i+1 < len(b) && b[i+1] == '/':
+			j := i
+			for j < len(b) && b[j] != '\n' {
+				j++
+			}
+			blank(i, j)
+			i = j
+		case b[i] == '/' && i+1 < len(b) && b[i+1] == '*':
+			j := i + 2
+			for j+1 < len(b) && !(b[j] == '*' && b[j+1] == '/') {
+				j++
+			}
+			blank(i, j+2)
+			i = j + 1
+		case b[i] == '"' || b[i] == '\'' || b[i] == '`':
+			q := b[i]
+			j := i + 1
+			for j < len(b) && b[j] != q {
+				if b[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			blank(i, j+1)
+			i = j
+		case b[i] == '/':
+			// A regex literal, but only where a value cannot precede it -- otherwise this is
+			// division. Getting it wrong the other way would blank real code.
+			if p := prevCode(i); p == 0 || strings.ContainsRune("(,=:[!&|?{};+-*%<>~^", rune(p)) {
+				j := i + 1
+				for j < len(b) && b[j] != '/' && b[j] != '\n' {
+					if b[j] == '\\' {
+						j++
+					}
+					j++
+				}
+				if j < len(b) && b[j] == '/' {
+					blank(i, j+1)
+					i = j
+				}
+			}
+		}
+	}
+	return string(b)
+}

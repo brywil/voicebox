@@ -1263,7 +1263,6 @@ async function send(userText, source = "typed") {
   // between rounds. curThink is cleared by each tool event so the next
   // reasoning delta opens a fresh block below it.
   curThink = null;
-  thinking = "";
   let full = "", thinking = "";
   try {
     const r = await fetch("/v1/chat/completions", {
