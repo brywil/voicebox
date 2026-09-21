@@ -106,3 +106,32 @@ can read.
 Still to come: the tool-calling loop itself, and speaking tool invocations as
 asides in the thinking voice — silence during a search is much worse in audio
 than on screen.
+
+## web_fetch added 2026-09-21, and what it costs
+
+The catalog was six tools and the agent could search but not READ: it returned titles and
+snippets and had no way to open any of them. Asked to look around, it correctly reported having
+"no file-system, browser-execution, or coding harness tools" — the gap was real, not a
+misconfiguration.
+
+`web_fetch` is now in the whitelist. Verified against a live page: a Hugging Face model card
+came back as 3,711 characters of text.
+
+**IT IS AN SSRF PATH, and "it goes through Ollama's cloud" is not a defence.** The tool tries
+Ollama's hosted fetch first, then falls back to a direct GET from THIS machine — a fallback
+added for a good reason (HF model pages 404 on the hosted API, and an agent that got the 404
+searched eight more times and then invented the document). `directFetch` is a plain
+`http.Client` with no address filtering. Demonstrated from the voicebox token:
+
+    web_fetch http://192.168.0.253:8085/v1/models
+      -> === Fetched: ... (direct GET) === {"models":[{"name":"/home/bryan/models-prod/...
+
+The label `(direct GET)` is the fallback announcing itself. Anything the Spark can reach is
+reachable this way, and voicebox serves :8080 unauthenticated to the LAN and tailnet, so
+whoever can open the page can direct the fetch.
+
+Accepted deliberately for now: this is a trusted LAN, and the alternative is an agent that
+searches and then cannot read what it found. The fix, if it stops being acceptable, belongs in
+mymcp rather than here — `directFetch` should refuse loopback, private and link-local
+destinations, which also covers goclaw's instance. Note that instance may legitimately want to
+fetch localhost, so the guard wants a flag rather than a hard block.

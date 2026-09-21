@@ -14,7 +14,7 @@ ExecStart=/home/bryan/.local/bin/mymcp serve \
   --memory-dir %h/.local/share/voicebox/memory \
   --cache-dir %h/.local/share/voicebox/scratch \
   --allow-exec=false \
-  --tools web_search_free,web_search_paid,memory_save,memory_search,memory_read,date_now
+  --tools web_search_free,web_search_paid,web_fetch,memory_save,memory_search,memory_read,date_now
 Restart=always
 RestartSec=5
 
