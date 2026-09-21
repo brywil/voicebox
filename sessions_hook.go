@@ -119,7 +119,7 @@ func (h *voicebox) withSession(w http.ResponseWriter, r *http.Request, body []by
 	// earlier turns are already stored -- appending them again would duplicate the entire
 	// conversation on every single request.
 	if last, ok := lastUserMessage(body); ok {
-		if _, err := h.store.Append(sid, origin, Message{Role: "user", Content: last}); err != nil {
+		if _, err := h.store.AppendUserTurn(sid, origin, last); err != nil {
 			log.Printf("[sessions] append user turn: %v", err)
 		}
 	}

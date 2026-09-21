@@ -1,0 +1,164 @@
+package main
+
+// Executes real client functions, rather than asserting that certain strings appear in them.
+//
+// WHY THIS FILE EXISTS. web_test.go's TestClientHonoursCompaction greps index.html for
+// "compacted_through" and passes if the string is present. A client that reads the field and
+// then ignores it contains the string, so the test was GREEN while the exact failure its own
+// comment described -- "a client that ignores compacted_through keeps sending everything,
+// the conversation keeps growing, and compaction achieves nothing while appearing to work on
+// the server side" -- was live in sessionLoad. Grepping for a symbol is a proxy for using it.
+//
+// So this pulls the real sessionLoad and buildContext out of the page, runs them under node
+// against a stub of the server's actual JSON shape, and counts the messages that come out.
+// That is the operation, not a proxy for it. Skips when node is absent so it does not become
+// a build dependency.
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// extractFn pulls one function out of the client source by balancing braces.
+//
+// It skips the parameter list first. Balancing braces from the declaration trips over a
+// destructured default like ({ silent = false } = {}), whose closing brace looks like the end
+// of the function body -- which silently truncates the extraction and produces a test that
+// exercises a fragment.
+func extractFn(t *testing.T, src, decl string) string {
+	t.Helper()
+	i := strings.Index(src, decl)
+	if i < 0 {
+		t.Fatalf("could not find %q in the client", decl)
+	}
+	p := strings.Index(src[i:], "(")
+	if p < 0 {
+		t.Fatalf("no parameter list after %q", decl)
+	}
+	p += i
+	depth := 0
+	j := p
+	for ; j < len(src); j++ {
+		switch src[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth == 0 {
+			break
+		}
+	}
+	b := strings.Index(src[j:], "{")
+	if b < 0 {
+		t.Fatalf("no body after the parameter list of %q", decl)
+	}
+	b += j
+	depth = 0
+	for k := b; k < len(src); k++ {
+		switch src[k] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[i : k+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces extracting %q", decl)
+	return ""
+}
+
+// TestClientDoesNotResendCompactedTurns is the real check behind compaction.
+//
+// The server returns the full recent window so the client can RENDER the scrollback, including
+// turns the summary already covers. The client must render those and NOT resend them. Getting
+// this wrong is silent and self-worsening: the server's estTokensFrom counts only messages
+// above compacted_through, so it believes the context is small while the client is shipping
+// summary-plus-everything, the hard threshold under-counts and never fires, and the backend
+// quietly drops the front of the conversation.
+func TestClientDoesNotResendCompactedTurns(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping executing client test")
+	}
+	src := clientHTML(t)
+	fns := extractFn(t, src, "async function sessionLoad") + "\n\n" +
+		extractFn(t, src, "function buildContext")
+
+	const total, covered = 10, 6
+	var msgs []string
+	for i := 1; i <= total; i++ {
+		role := "user"
+		if i%2 == 0 {
+			role = "assistant"
+		}
+		msgs = append(msgs, fmt.Sprintf(`{"seq":%d,"role":%q,"content":"turn %d body"}`, i, role, i))
+	}
+
+	harness := fmt.Sprintf(`
+// --- stubs for the page globals the extracted functions touch -----------------
+let history = [], sessionId = null, sessionHead = 0;
+let compactedThrough = 0, summaryText = "", sessionES = null;
+const logEl = { innerHTML: "", appendChild(){}, set scrollTop(v){}, get scrollTop(){return 0} };
+const localStorage = { store:{}, setItem(k,v){this.store[k]=v}, getItem(k){return this.store[k]??null} };
+function addMsg(){ return { parentNode:null }; }
+function addReplay(){}
+function stripTag(t){ return t.replace(/^\s*\[(voice|typed)\]\s*/i, ""); }
+function status(){}
+function showCompactionMarker(){ return { remove(){} }; }
+function renderMessage(){}
+function sessionSubscribe(){}
+const SERVER = {
+  id: "s1", title: "t", created: 0, updated: 0,
+  head: %d, total: %d, truncated: false,
+  summary: "FACTS - the port is 8080",
+  compacted_through: %d,
+  messages: [%s]
+};
+globalThis.fetch = async () => ({ ok: true, json: async () => SERVER });
+
+%s
+
+// --- the actual check ---------------------------------------------------------
+await sessionLoad("s1", { silent: true });
+const sent = buildContext();
+const resent = sent.filter(m => m.role !== "system" &&
+  SERVER.messages.some(s => s.seq <= SERVER.compacted_through && s.content === m.content));
+console.log(JSON.stringify({
+  sent: sent.length,
+  resentCoveredTurns: resent.length,
+  hasSummary: sent.some(m => m.role === "system" && m.content.includes("FACTS")),
+}));
+`, total, total, covered, strings.Join(msgs, ","), fns)
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "check.mjs")
+	if err := os.WriteFile(f, []byte(harness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("harness failed to run:\n%s", out)
+	}
+	line := strings.TrimSpace(string(out))
+	t.Logf("client produced: %s", line)
+
+	if !strings.Contains(line, `"hasSummary":true`) {
+		t.Error("the summary was not included in the context; earlier turns are simply lost")
+	}
+	if !strings.Contains(line, `"resentCoveredTurns":0`) {
+		t.Errorf("the client RESENDS turns the summary already covers, so compaction has no "+
+			"effect on what reaches the model -- and the server's token estimate, which "+
+			"excludes them, will under-count and never trigger the hard limit.\ngot: %s", line)
+	}
+	// summary + the 4 turns above compacted_through
+	if !strings.Contains(line, fmt.Sprintf(`"sent":%d`, 1+total-covered)) {
+		t.Errorf("expected summary plus %d surviving turns; got: %s", total-covered, line)
+	}
+}

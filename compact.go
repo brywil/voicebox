@@ -248,6 +248,16 @@ const (
 // which would run two summarisers over the same turns and have the second overwrite the first.
 var inFlight sync.Map // session id -> struct{}
 
+// compactGuarded is the synchronous entry point: it honours inFlight and reports the error to
+// the caller. compactOnce is the fire-and-forget variant used by the automatic triggers.
+func (h *voicebox) compactGuarded(ctx context.Context, id, backendID, model string, keep int) error {
+	if _, busy := inFlight.LoadOrStore(id, struct{}{}); busy {
+		return fmt.Errorf("a compaction is already running for this conversation")
+	}
+	defer inFlight.Delete(id)
+	return h.Compact(ctx, id, backendID, model, keep)
+}
+
 func (h *voicebox) compactOnce(id, backendID, model, why string) {
 	if _, busy := inFlight.LoadOrStore(id, struct{}{}); busy {
 		return

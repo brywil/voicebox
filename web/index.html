@@ -495,8 +495,17 @@ async function sessionLoad(id, { silent = false } = {}) {
   if (summaryText) {
     showCompactionMarker(`⋯ ${compactedThrough} earlier turns summarised`, false);
   }
+  // RENDER every returned turn, but SEND only the ones the summary does not already cover.
+  // Conflating those two is the bug this mechanism exists to prevent: the scrollback wants the
+  // whole window so the conversation reads correctly, while `history` is what gets posted back
+  // to the model -- and resending summarised turns makes compaction a no-op.
+  //
+  // Worse than a no-op, because the two sides then disagree about the size of the context. The
+  // server's estTokensFrom counts only messages above compacted_through, so it believes the
+  // context is small while this page ships summary-plus-everything; the hard threshold
+  // under-counts, never fires, and the backend silently drops the front of the conversation.
   for (const m of d.messages) {
-    history.push({ role: m.role, content: m.content });
+    if (m.seq > compactedThrough) history.push({ role: m.role, content: m.content });
     renderMessage(m);
   }
   sessionSubscribe();

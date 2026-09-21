@@ -425,3 +425,92 @@ func TestSetSummaryBroadcastsCompact(t *testing.T) {
 		t.Errorf("compaction deleted messages: %d remain", len(got.Messages))
 	}
 }
+
+// A failed turn leaves the question on disk but pops it from the page, so the user retypes and
+// sends it again. Storing it twice is invisible until the next refresh.
+func TestRetriedUserTurnIsNotStoredTwice(t *testing.T) {
+	st := newTestStore(t)
+	s, _ := st.Create("")
+
+	st.AppendUserTurn(s.ID, "c", "what is the port")
+	st.AppendUserTurn(s.ID, "c", "what is the port") // the retry
+	got, _ := st.Get(s.ID)
+	if len(got.Messages) != 1 {
+		t.Fatalf("retry stored a duplicate: %d messages", len(got.Messages))
+	}
+
+	// The same text sent again AFTER a reply is a deliberate repeat, not a retry, and must be
+	// kept -- asking the same question twice in a conversation is legitimate.
+	st.Append(s.ID, "c", Message{Role: "assistant", Content: "8080"})
+	st.AppendUserTurn(s.ID, "c", "what is the port")
+	got, _ = st.Get(s.ID)
+	if len(got.Messages) != 3 {
+		t.Fatalf("a deliberate repeat after a reply was swallowed: %d messages", len(got.Messages))
+	}
+}
+
+// Delete must tell the other devices. Without it their next turn hits an unknown session, the
+// hook quietly returns the no-op writer, and chat keeps working while nothing is saved.
+func TestDeleteNotifiesAndClosesSubscribers(t *testing.T) {
+	st := newTestStore(t)
+	s, _ := st.Create("")
+	ch, release := st.Subscribe(s.ID)
+	defer release() // must not panic even though Delete closes the channel
+
+	if err := st.Delete(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ev, open := <-ch:
+		if !open {
+			t.Fatal("channel closed without delivering the deleted event first")
+		}
+		if ev.Kind != "deleted" {
+			t.Errorf("Kind = %q, want deleted", ev.Kind)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no deleted event broadcast")
+	}
+}
+
+// Sending from one device must show YOUR OWN message on every other device promptly -- well
+// before the reply exists -- so the conversation feels like one session regardless of which
+// input you used. This is an explicit requirement, not a side effect, so it is pinned here.
+//
+// It works because the user turn is persisted and broadcast ON RECEIPT while the assistant
+// turn waits for completion. Any change that defers the user turn to the end of the request
+// would still pass every other test in this file and would quietly break this.
+func TestOwnMessageReachesOtherDevicesBeforeTheReply(t *testing.T) {
+	st := newTestStore(t)
+	s, _ := st.Create("")
+	ch, release := st.Subscribe(s.ID)
+	defer release()
+
+	slowReply := make(chan struct{})
+	go func() { // stands in for a model that takes a while
+		<-slowReply
+		st.Append(s.ID, "phone", Message{Role: "assistant", Content: "the reply"})
+	}()
+
+	st.AppendUserTurn(s.ID, "phone", "does this show up on the iPad?")
+
+	select {
+	case ev := <-ch:
+		if len(ev.Msgs) != 1 || ev.Msgs[0].Role != "user" {
+			t.Fatalf("first event was not the user turn: %+v", ev.Msgs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the user's own message never reached the other device; it is being held " +
+			"until the reply completes, so a second device sees nothing while the model thinks")
+	}
+
+	close(slowReply)
+	select {
+	case ev := <-ch:
+		if len(ev.Msgs) != 1 || ev.Msgs[0].Role != "assistant" {
+			t.Fatalf("second event was not the assistant turn: %+v", ev.Msgs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reply never arrived at the other device")
+	}
+}

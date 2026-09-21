@@ -228,11 +228,37 @@ func (s *Store) List() ([]SessionMeta, error) {
 	return out, nil
 }
 
+// Delete removes a conversation and TELLS the other devices.
+//
+// Without the broadcast the failure is silent and total: another device's EventSource stays
+// open and quiet, its next turn hits a session that no longer exists, the hook logs "chat
+// referenced unknown session" and returns the no-op writer -- so chat keeps working perfectly
+// while nothing is saved, and the only evidence is one line in the server log.
+//
+// Subscribers are released after the notice so they receive it before their channels close,
+// and the per-session lock and subscriber map entries are dropped: nothing will ever reference
+// this id again, and keeping them leaks an entry per deleted conversation for the process
+// lifetime.
 func (s *Store) Delete(id string) error {
 	if !safeID(id) {
 		return errors.New("bad session id")
 	}
-	return os.Remove(s.path(id))
+	if err := os.Remove(s.path(id)); err != nil {
+		return err
+	}
+	s.broadcast(Event{Session: id, Kind: "deleted"})
+
+	s.submu.Lock()
+	for _, ch := range s.subs[id] {
+		close(ch)
+	}
+	delete(s.subs, id)
+	s.submu.Unlock()
+
+	s.mu.Lock()
+	delete(s.locks, id)
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Store) Rename(id, title string) error {
@@ -246,6 +272,34 @@ func (s *Store) Rename(id, title string) error {
 	sess.Title = title
 	sess.Updated = time.Now().UnixMilli()
 	return s.write(sess)
+}
+
+// AppendUserTurn stores a user turn, skipping it if it is a retry of one that never got a reply.
+//
+// The user turn is persisted ON RECEIPT, before generation, so that a refresh mid-reply keeps
+// the question. The cost of that choice is this: if the request then fails, the client pops the
+// turn from its local history (index.html, the catch around the fetch) while the server has
+// already written it. The user retypes, resends, and it lands a second time -- invisible until
+// the next refresh, when the duplicate appears in the scrollback.
+//
+// Deduplicating on "the tail is an identical user turn with no assistant turn after it" rather
+// than on a client-generated id, because the client cannot actually supply one honestly. It has
+// no retry button; the user simply types the message again, and the page has no way to know
+// whether that is a retry or a deliberate repeat. The server can tell, and precisely: an
+// unanswered identical user turn at the tail is a failed attempt, whereas the same text sent
+// twice on purpose has a reply between the two.
+//
+// Note the append-not-replace rule cannot help here. That protects against a stale device
+// DELETING a turn; this is the same device adding one twice.
+func (s *Store) AppendUserTurn(id, origin, content string) ([]Message, error) {
+	sess, err := s.Get(id)
+	if err == nil && len(sess.Messages) > 0 {
+		last := sess.Messages[len(sess.Messages)-1]
+		if last.Role == "user" && last.Content == content {
+			return nil, nil // unanswered identical turn at the tail: this is a retry
+		}
+	}
+	return s.Append(id, origin, Message{Role: "user", Content: content})
 }
 
 // Append adds turns, assigns their sequence numbers, persists, and notifies watchers.
@@ -361,6 +415,7 @@ func (s *Store) Subscribe(id string) (<-chan Event, func()) {
 	s.submu.Unlock()
 	return ch, func() {
 		s.submu.Lock()
+		_, still := s.subs[id][sid]
 		if m, ok := s.subs[id]; ok {
 			delete(m, sid)
 			if len(m) == 0 {
@@ -368,7 +423,12 @@ func (s *Store) Subscribe(id string) (<-chan Event, func()) {
 			}
 		}
 		s.submu.Unlock()
-		close(ch)
+		// Only close what is still registered. Delete() closes every subscriber of a removed
+		// session, and closing an already-closed channel panics -- which would take down the
+		// server when a watcher of a deleted conversation happens to disconnect.
+		if still {
+			close(ch)
+		}
 	}
 }
 

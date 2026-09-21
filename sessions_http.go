@@ -123,7 +123,13 @@ func (h *voicebox) registerSessionRoutes(mux *http.ServeMux) {
 		if body.Keep <= 0 {
 			body.Keep = defaultKeepVerbatim
 		}
-		if err := h.Compact(r.Context(), r.PathValue("id"), body.Backend, body.Model, body.Keep); err != nil {
+		// Through compactGuarded, not Compact directly: inFlight exists so the sweeper and
+		// the request path cannot run two summarisers over the same turns, and calling
+		// Compact here would let a "compact now" press during an auto compaction do exactly
+		// that. Stored state would stay consistent -- SetSummary writes summary and through
+		// together -- but it wastes a backend slot and, on --parallel 1, stalls the user's
+		// next turn for the measured 5 s.
+		if err := h.compactGuarded(r.Context(), r.PathValue("id"), body.Backend, body.Model, body.Keep); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
