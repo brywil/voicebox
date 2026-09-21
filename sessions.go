@@ -291,15 +291,33 @@ func (s *Store) Rename(id, title string) error {
 //
 // Note the append-not-replace rule cannot help here. That protects against a stale device
 // DELETING a turn; this is the same device adding one twice.
+// The tail is read UNDER THE SESSION LOCK and the append happens without releasing it. Reading
+// it first and appending afterwards leaves a window in which two identical turns arriving
+// together both see a clean tail and both store -- the same check-then-act shape the dedup
+// exists to close, just narrower. Measured before this was closed: two concurrent identical
+// turns produced two stored messages.
 func (s *Store) AppendUserTurn(id, origin, content string) ([]Message, error) {
+	m := s.lockFor(id)
+	m.Lock()
 	sess, err := s.Get(id)
-	if err == nil && len(sess.Messages) > 0 {
-		last := sess.Messages[len(sess.Messages)-1]
+	if err != nil {
+		m.Unlock()
+		return nil, err
+	}
+	if n := len(sess.Messages); n > 0 {
+		last := sess.Messages[n-1]
 		if last.Role == "user" && last.Content == content {
+			m.Unlock()
 			return nil, nil // unanswered identical turn at the tail: this is a retry
 		}
 	}
-	return s.Append(id, origin, Message{Role: "user", Content: content})
+	added, err := s.appendLocked(sess, []Message{{Role: "user", Content: content}})
+	m.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	s.broadcast(Event{Session: id, Origin: origin, Kind: "commit", Msgs: added})
+	return added, nil
 }
 
 // Append adds turns, assigns their sequence numbers, persists, and notifies watchers.
@@ -337,6 +355,20 @@ func (s *Store) Append(id, origin string, msgs ...Message) ([]Message, error) {
 		m.Unlock()
 		return nil, err
 	}
+	added, err := s.appendLocked(sess, msgs)
+	m.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	s.broadcast(Event{Session: id, Origin: origin, Kind: "commit", Msgs: added})
+	return added, nil
+}
+
+// appendLocked assigns sequence numbers, stamps the time and persists. The caller must already
+// hold the session's lock, and must broadcast only AFTER releasing it -- a subscriber whose
+// buffer is full is dropped rather than waited on, but broadcasting under the lock would still
+// hold up every other writer for the duration of the fan-out.
+func (s *Store) appendLocked(sess *Session, msgs []Message) ([]Message, error) {
 	now := time.Now().UnixMilli()
 	added := make([]Message, 0, len(msgs))
 	for _, msg := range msgs {
@@ -350,13 +382,7 @@ func (s *Store) Append(id, origin string, msgs ...Message) ([]Message, error) {
 	if sess.Title == "" {
 		sess.Title = deriveTitle(msgs)
 	}
-	err = s.write(sess)
-	m.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	s.broadcast(Event{Session: id, Origin: origin, Kind: "commit", Msgs: added})
-	return added, nil
+	return added, s.write(sess)
 }
 
 // deriveTitle makes the picker readable. A list of timestamps is not a picker.

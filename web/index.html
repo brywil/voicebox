@@ -525,6 +525,31 @@ async function sessionNew() {
   return d;
 }
 
+// sessionGone handles this conversation disappearing underneath the page -- deleted from
+// another device, or otherwise absent from the store.
+//
+// Doing nothing is NOT a harmless default, which is why this exists. The page would keep
+// posting a session id the server no longer has; the hook declines to persist every turn and
+// writes one line to the server log, while the UI carries on looking completely normal. Chat
+// that silently stops being saved is the failure the whole session mechanism exists to prevent,
+// so the page moves to a fresh session rather than talking into a conversation that is gone.
+//
+// The marker goes in AFTER the new session has cleared the log, or it would be wiped by the
+// thing that is supposed to explain it.
+async function sessionGone() {
+  if (sessionES) { sessionES.close(); sessionES = null; }
+  localStorage.removeItem("vb.session");
+  sessionId = null;
+  try {
+    await sessionNew();
+    await sessionRefreshList();
+    showCompactionMarker("⋯ this conversation was deleted on another device", false);
+    status("conversation deleted elsewhere — started a new one", "warn");
+  } catch {
+    status("conversation deleted elsewhere; could not start a new one", "err");
+  }
+}
+
 // sessionSubscribe opens the live stream.
 //
 // EventSource reconnects on its own and resends Last-Event-ID, and the server replays
@@ -559,6 +584,7 @@ function sessionSubscribe() {
       }).catch(() => {});
       return;
     }
+    if (ev.kind === "deleted") { sessionGone(); return; }
     // kind: commit
     for (const m of ev.msgs || []) {
       if (m.seq <= sessionHead) continue;   // already have it
@@ -571,7 +597,18 @@ function sessionSubscribe() {
       status(`synced from another device — ${m.role}`);
     }
   };
-  es.onerror = () => { /* EventSource retries on its own; nothing useful to do here */ };
+  es.onerror = () => {
+    // EventSource retries a DROPPED connection on its own, and there is nothing useful to do
+    // about that here. A non-200 is different: the spec fails the connection permanently,
+    // readyState goes CLOSED and there are no further attempts. A deleted session returns 404,
+    // so that is the state this lands in -- and it is also where a `deleted` event that was
+    // dropped rather than delivered ends up, since broadcast drops instead of blocking. So the
+    // check belongs here as well as in onmessage, or the rarer path is the unhandled one.
+    if (es !== sessionES || es.readyState !== EventSource.CLOSED || !sessionId) return;
+    fetch(`/api/sessions/${sessionId}`)
+      .then((r) => { if (r.status === 404) sessionGone(); })
+      .catch(() => { /* offline: the session may still be there. Leave it alone. */ });
+  };
 }
 
 async function sessionRefreshList() {

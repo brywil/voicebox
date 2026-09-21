@@ -162,3 +162,94 @@ console.log(JSON.stringify({
 		t.Errorf("expected summary plus %d surviving turns; got: %s", total-covered, line)
 	}
 }
+
+// TestClientActsOnDeletedEvent executes the live-stream handler against a deleted session.
+//
+// The server broadcasts kind:"deleted" and closes that session's subscribers, and a test on
+// the server side can show the event goes out. That is not the fix. If the PAGE ignores it,
+// the user-visible failure is exactly what it was before the event existed: the device keeps
+// posting a session id the server no longer has, the hook declines every turn, and the only
+// evidence is one line in the server log while the UI looks entirely normal.
+//
+// So this runs the real sessionSubscribe and sessionGone, feeds the handler a deleted event,
+// and checks the page actually stops using the dead id.
+func TestClientActsOnDeletedEvent(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping executing client test")
+	}
+	src := clientHTML(t)
+	fns := extractFn(t, src, "async function sessionGone") + "\n\n" +
+		extractFn(t, src, "function sessionSubscribe")
+
+	harness := `
+// --- stubs for the page globals the extracted functions touch -----------------
+let sessionId = "dead-one", sessionES = null, sessionHead = 0;
+let history = [], compactedThrough = 0, summaryText = "", compactingEl = null;
+const CLIENT_ID = "deviceA";
+const localStorage = {
+  store: { "vb.session": "dead-one" },
+  setItem(k, v) { this.store[k] = v; },
+  getItem(k) { return this.store[k] ?? null; },
+  removeItem(k) { delete this.store[k]; },
+};
+let newCalls = 0, markers = [];
+async function sessionNew() { newCalls++; sessionId = "fresh-one"; localStorage.setItem("vb.session", sessionId); }
+async function sessionRefreshList() {}
+function showCompactionMarker(text) { markers.push(text); return { remove() {} }; }
+function status() {}
+function renderMessage() {}
+class FakeES {
+  constructor(url) { this.url = url; this.readyState = 1; FakeES.last = this; }
+  close() { this.readyState = 2; this.closed = true; }
+}
+FakeES.CLOSED = 2;
+globalThis.EventSource = FakeES;
+globalThis.fetch = async () => ({ status: 404, ok: false, json: async () => ({}) });
+
+` + fns + `
+
+// --- the actual check ---------------------------------------------------------
+sessionSubscribe();
+const opened = FakeES.last;
+opened.onmessage({ data: JSON.stringify({ session: "dead-one", kind: "deleted" }) });
+await new Promise((r) => setTimeout(r, 50));
+console.log(JSON.stringify({
+  startedNewSession: newCalls,
+  stillUsingDeadId: sessionId === "dead-one",
+  deadIdStillStored: localStorage.getItem("vb.session") === "dead-one",
+  closedTheDeadStream: opened.closed === true,
+  toldTheUser: markers.some((m) => /deleted/i.test(m)),
+}));
+`
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "deleted.mjs")
+	if err := os.WriteFile(f, []byte(harness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("harness failed to run:\n%s", out)
+	}
+	line := strings.TrimSpace(string(out))
+	t.Logf("client produced: %s", line)
+
+	for _, want := range []struct{ frag, why string }{
+		{`"stillUsingDeadId":false`,
+			"the page kept the deleted session id: every following turn is posted to a session " +
+				"the server no longer has, declined, and lost with only a log line to show for it"},
+		{`"deadIdStillStored":false`,
+			"the deleted id is still in localStorage, so the next refresh resumes it again"},
+		{`"startedNewSession":1`,
+			"no replacement session was started, so nothing said from here on is saved"},
+		{`"closedTheDeadStream":true`,
+			"the dead EventSource was left open"},
+		{`"toldTheUser":true`,
+			"the conversation vanished from under the user with nothing on screen to say so"},
+	} {
+		if !strings.Contains(line, want.frag) {
+			t.Errorf("%s\ngot: %s", want.why, line)
+		}
+	}
+}

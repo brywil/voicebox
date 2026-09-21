@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -579,5 +580,42 @@ func TestOwnMessageReachesOtherDevicesBeforeTheReply(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the reply never arrived at the other device")
+	}
+}
+
+// Two identical user turns arriving AT THE SAME TIME must still store once.
+//
+// The retry dedup reads the tail and then appends. If the read is not under the same lock as
+// the append, both callers see a clean tail and both store -- which is the check-then-act shape
+// the dedup itself exists to close. Measured at two stored messages before the read was moved
+// inside the lock, and the race detector says nothing about it: it is a logic window, not a
+// data race, so only a test that counts the result can catch it.
+func TestAppendUserTurnDedupesUnderConcurrency(t *testing.T) {
+	st := newTestStore(t)
+	sess, err := st.Create("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := st.AppendUserTurn(sess.ID, "deviceA", "double tap"); err != nil {
+				t.Errorf("AppendUserTurn: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := st.Get(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Messages) != 1 {
+		for _, m := range got.Messages {
+			t.Logf("seq=%d role=%s %q", m.Seq, m.Role, m.Content)
+		}
+		t.Errorf("stored %d copies of one turn sent concurrently; want 1", len(got.Messages))
 	}
 }
