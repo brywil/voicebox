@@ -161,3 +161,24 @@ that same directory, so `grep` will turn up the text of pages fetched earlier â€
 it means the workspace is not empty of content the user did not put there.
 
 `parse_json` takes `input` or `url` (plus `keys`, `indent`) â€” not `json`.
+
+## Changing the whitelist needs BOTH services restarted
+
+`MCPClient.Tools` caches the catalog after the first call, and says why: "the catalog is fixed
+at the server's start -- it is a whitelist in a unit file -- so re-asking per turn would be
+pure latency." True, but the boundary is wrong. It is fixed for **mymcp's** run, and the cache
+lives in **voicebox's** process, so restarting mymcp alone leaves voicebox serving the old list
+forever.
+
+Observed: mymcp restarted with thirteen tools, `tools/list` on 9445 returned thirteen, and the
+assistant still reported six -- correctly, and with no way to tell it was wrong. It cannot
+probe for tools; it only knows what the harness declared at the start of the turn.
+
+So the procedure is:
+
+    systemctl --user restart mymcp-voicebox   # new catalog
+    systemctl --user restart voicebox         # drop the cached one
+
+If this bites again, the cheap fix is to invalidate on a failed call: a `tools/call` that comes
+back "unknown tool" is exactly the signal that the cached catalog is stale, and re-listing once
+before giving up costs one round trip on a path that was already failing.
