@@ -322,3 +322,111 @@ console.log(JSON.stringify({
 		}
 	}
 }
+
+// TestClientSendReachesTheServer executes send() -- the function EVERY turn goes through.
+//
+// This is the test whose absence let a broken page ship. The client was dead for a full day
+// on a temporal dead zone violation at the top of send():
+//
+//	curThink = null;
+//	thinking = "";          // <- assignment before the `let` below, same block
+//	let full = "", thinking = "";
+//
+// Nothing caught it, and each near-miss failed for its own reason. web_test.go greps for
+// "X-Voicebox-Session" and the string was right there in the dead code. TestClientJavaScript-
+// Parses runs `node --check`, and the file parses -- TDZ is a RUNTIME error, so a parse never
+// executes the line. The Go suite tested the server end-to-end with curl and was entirely green,
+// because the server was fine; the browser simply never called it. An empty server log looked
+// like "no traffic", not like "every turn is dying before the fetch".
+//
+// A static scanner for that one bug class now exists (TestClientHasNoUseBeforeDeclaration) and is
+// worth keeping, but it only knows the shape it was taught. The general defence is to RUN the
+// function: any error before the fetch -- TDZ, a typo'd global, a renamed helper, a null deref --
+// means no request, and this test fails on all of them identically.
+//
+// So it asserts the one thing that must be true of send(): a request LEAVES, carrying the session
+// headers. The DOM is a permissive proxy on purpose -- the subject is send()'s control flow up to
+// the network call, not the fidelity of the fake page.
+func TestClientSendReachesTheServer(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping executing client test")
+	}
+	src := moduleScript(t, clientHTML(t))
+	fns := extractFn(t, src, "async function send") + "\n\n" +
+		extractFn(t, src, "function buildContext")
+
+	const harness = `
+// A DOM stand-in that tolerates any property, call, or await. send() manipulates the page
+// throughout; none of that is what is under test, and a fake that models it exactly would
+// break on cosmetic edits.
+const any = new Proxy(function () {}, {
+  get: (t, k) => (k === "then" ? undefined : any),   // not thenable: an await must not hang
+  set: () => true,
+  apply: () => any,
+  construct: () => any,
+});
+
+let busy = false, curThink = null, history = [];
+const talkBtn = { disabled: false }, talkLabel = any;
+const $ = () => ({ checked: false, value: "", appendChild() {}, scrollTop: 0 });
+const addMsg = () => any, addReplay = () => any, handleToolEvent = () => any;
+const speakStreaming = async () => {}, speakThinkingStream = async () => {};
+const refreshTalkButton = () => {}, applyEffort = (b) => b, stripTag = (s) => s;
+const status = (m, k) => console.log("STATUS " + k + " " + m);
+const models = [], available = () => true, sttEngine = () => "web";
+const probeWebSpeech = async () => true, recogniseWebSpeech = async () => "";
+const SR = null, log = any, chars = (s) => s;
+const backendEl = { value: "local" }, modelEl = { value: "test-model" };
+const sessionId = "S-TEST", CLIENT_ID = "C-TEST";
+let summaryText = "", compactedThrough = 0;
+
+let seen = null;
+globalThis.fetch = async (url, opt) => {
+  seen = { url, opt };
+  // One well-formed SSE chunk so the reader loop terminates.
+  const body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n';
+  const bytes = new TextEncoder().encode(body);
+  let done = false;
+  return {
+    ok: true, status: 200,
+    body: { getReader: () => ({ read: async () => done ? { done: true } : (done = true, { value: bytes, done: false }) }) },
+    json: async () => ({}), text: async () => "",
+  };
+};
+
+await send("hello");
+
+if (!seen) {
+  console.log("NOFETCH");
+} else {
+  const h = (seen.opt && seen.opt.headers) || {};
+  console.log("URL " + seen.url);
+  console.log("SESSION " + (h["X-Voicebox-Session"] || ""));
+  console.log("CLIENT " + (h["X-Voicebox-Client"] || ""));
+}
+`
+	f := filepath.Join(t.TempDir(), "send.mjs")
+	if err := os.WriteFile(f, []byte(fns+"\n"+harness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, f).CombinedOutput()
+	got := string(out)
+	if err != nil {
+		t.Fatalf("send() threw before completing -- in a browser this means the turn dies and "+
+			"NOTHING reaches the server, which is exactly how the page was broken for a day:\n%s", got)
+	}
+	if strings.Contains(got, "NOFETCH") {
+		t.Fatalf("send() completed without calling fetch: no turn would ever reach the server.\n"+
+			"Note send() wraps its body in try/catch, so an error before the fetch is SWALLOWED and\n"+
+			"surfaces only as a status line here:\n%s", got)
+	}
+	if !strings.Contains(got, "SESSION S-TEST") {
+		t.Errorf("send() did not send X-Voicebox-Session; the server cannot persist or fan out "+
+			"the turn, and reports no error:\n%s", got)
+	}
+	if !strings.Contains(got, "CLIENT C-TEST") {
+		t.Errorf("send() did not send X-Voicebox-Client; the sending device cannot suppress its "+
+			"own echo and will render every message twice:\n%s", got)
+	}
+}
