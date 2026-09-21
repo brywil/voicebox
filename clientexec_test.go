@@ -106,6 +106,9 @@ func TestClientDoesNotResendCompactedTurns(t *testing.T) {
 let history = [], sessionId = null, sessionHead = 0;
 let compactedThrough = 0, summaryText = "", sessionES = null;
 const logEl = { innerHTML: "", appendChild(){}, set scrollTop(v){}, get scrollTop(){return 0} };
+// buildContext labels turns from a model other than the one now selected, so it needs to know
+// which that is. Every stored turn here carries no model, so nothing should be labelled.
+const modelEl = { value: "model-a" };
 const localStorage = { store:{}, setItem(k,v){this.store[k]=v}, getItem(k){return this.store[k]??null} };
 function addMsg(){ return { parentNode:null }; }
 function addReplay(){}
@@ -247,6 +250,72 @@ console.log(JSON.stringify({
 			"the dead EventSource was left open"},
 		{`"toldTheUser":true`,
 			"the conversation vanished from under the user with nothing on screen to say so"},
+	} {
+		if !strings.Contains(line, want.frag) {
+			t.Errorf("%s\ngot: %s", want.why, line)
+		}
+	}
+}
+
+// TestClientLabelsTurnsFromAnotherModel executes buildContext across a model switch.
+//
+// The picker can change the model mid-conversation while earlier turns stay verbatim in the
+// context. Unlabelled, the incoming model reads its predecessor's words as its own first-person
+// history -- openclaw-go 5104a5a, where a model went in circles over which model it was after
+// three backend swaps in one evening. The label must go on turns from ANOTHER model only: a
+// model reading its own words should see exactly what it saw before and pay nothing.
+//
+// Also checks the `model` field itself never leaves the page. It is bookkeeping, and an
+// unrecognised field on a message is ignored by some backends and rejected by others.
+func TestClientLabelsTurnsFromAnotherModel(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping executing client test")
+	}
+	fns := extractFn(t, clientHTML(t), "function buildContext")
+
+	harness := `
+let summaryText = "";
+const modelEl = { value: "model-now" };
+const history = [
+  { role: "user", content: "who are you" },
+  { role: "assistant", content: "the small one", model: "model-before" },
+  { role: "user", content: "and now" },
+  { role: "assistant", content: "the large one", model: "model-now" },
+];
+
+` + fns + `
+
+const sent = buildContext();
+const byContent = (frag) => sent.find((m) => m.content.includes(frag));
+console.log(JSON.stringify({
+  foreignLabelled: /^\[written by model-before/.test(byContent("the small one").content),
+  ownTurnUntouched: byContent("the large one").content === "the large one",
+  userTurnsUntouched: sent.filter((m) => m.role === "user")
+                          .every((m) => !m.content.startsWith("[written by")),
+  leaksModelField: sent.some((m) => "model" in m),
+}));
+`
+	dir := t.TempDir()
+	f := filepath.Join(dir, "attribution.mjs")
+	if err := os.WriteFile(f, []byte(harness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("harness failed to run:\n%s", out)
+	}
+	line := strings.TrimSpace(string(out))
+	t.Logf("client produced: %s", line)
+
+	for _, want := range []struct{ frag, why string }{
+		{`"foreignLabelled":true`,
+			"a turn from the previous model is unlabelled, so the current model reads it as its own"},
+		{`"ownTurnUntouched":true`,
+			"the model's OWN turns were labelled too, which changes what it sees for no reason"},
+		{`"userTurnsUntouched":true`, "a user turn was attributed to a model"},
+		{`"leaksModelField":false`,
+			"the bookkeeping `model` field is being sent upstream on each message"},
 	} {
 		if !strings.Contains(line, want.frag) {
 			t.Errorf("%s\ngot: %s", want.why, line)

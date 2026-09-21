@@ -619,3 +619,143 @@ func TestAppendUserTurnDedupesUnderConcurrency(t *testing.T) {
 		t.Errorf("stored %d copies of one turn sent concurrently; want 1", len(got.Messages))
 	}
 }
+
+// fakeSummariser stands in for a backend and captures the transcript it was asked to compress.
+func fakeSummariser(t *testing.T, got *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "user" {
+				*got = m.Content
+			}
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"NOTES"}}]}`))
+	}))
+}
+
+func compactWith(t *testing.T, msgs []Message) string {
+	t.Helper()
+	st := newTestStore(t)
+	sess, err := st.Create("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if _, err := st.Append(sess.ID, "c", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var transcript string
+	srv := fakeSummariser(t, &transcript)
+	defer srv.Close()
+	h := &voicebox{
+		store:    st,
+		upstream: srv.Client(),
+		cfg:      &Config{Default: "b", Backends: []*Backend{{ID: "b", URL: srv.URL}}},
+	}
+	// keepVerbatim 0: summarise everything, so the test controls the span exactly.
+	if err := h.Compact(t.Context(), sess.ID, "b", "model-c", 0); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	return transcript
+}
+
+// A summary spanning a model switch must say which model said what.
+//
+// The verbatim tail can be labelled on the fly, because each turn still carries its Model --
+// but a summary is flattened text that outlives those turns, so an unlabelled one merges two
+// models into a single first-person account with no way to recover the distinction later.
+func TestCompactAttributesWhenModelsDiffer(t *testing.T) {
+	transcript := compactWith(t, []Message{
+		{Role: "user", Content: "which model are you"},
+		{Role: "assistant", Content: "I am the small one", Model: "model-a"},
+		{Role: "user", Content: "and now"},
+		{Role: "assistant", Content: "I am the large one", Model: "model-b"},
+	})
+	for _, want := range []string{"assistant (model-a)", "assistant (model-b)"} {
+		if !strings.Contains(transcript, want) {
+			t.Errorf("transcript does not attribute %q; a summary spanning a model switch "+
+				"blends both into one voice\n---\n%s", want, transcript)
+		}
+	}
+	if !strings.Contains(transcript, "more than one model") {
+		t.Error("the summariser was not told the labels mean something, so it may drop them")
+	}
+}
+
+// ...and a conversation that never switched must NOT be labelled: the labels would be noise,
+// and every turn in a single-model conversation is the reader's own.
+func TestCompactDoesNotAttributeSingleModel(t *testing.T) {
+	transcript := compactWith(t, []Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hello back", Model: "model-a"},
+		{Role: "user", Content: "again"},
+		{Role: "assistant", Content: "again back", Model: "model-a"},
+	})
+	if strings.Contains(transcript, "(model-a)") || strings.Contains(transcript, "more than one model") {
+		t.Errorf("a single-model conversation was labelled anyway\n---\n%s", transcript)
+	}
+}
+
+// An old transcript stored before attribution existed has no Model on any turn. It must not be
+// treated as having crossed a switch.
+func TestCompactIgnoresUnlabelledHistory(t *testing.T) {
+	transcript := compactWith(t, []Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hello back"},
+		{Role: "assistant", Content: "and again"},
+	})
+	if strings.Contains(transcript, "more than one model") {
+		t.Errorf("history with no model recorded was read as a model switch\n---\n%s", transcript)
+	}
+}
+
+// The stored assistant turn must record which model produced it. Nothing downstream can
+// reconstruct this later: the request is gone, and the transcript is all that is left.
+func TestAssistantTurnRecordsItsModel(t *testing.T) {
+	st := newTestStore(t)
+	// A cfg with no reachable backend: the completion hook checks whether to compact, and that
+	// path needs a config even though this test is not about compaction.
+	h := &voicebox{store: st, cfg: &Config{Default: "b", Backends: []*Backend{{ID: "b"}}}}
+	sess, err := st.Create("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"model":"model-b","messages":[{"role":"user","content":"hi"}]}`)
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(body)))
+	r.Header.Set("X-Voicebox-Session", sess.ID)
+	w := httptest.NewRecorder()
+	tee, done := h.withSession(w, r, body)
+	_, _ = tee.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+	done()
+
+	got, err := st.Get(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assistant *Message
+	for i := range got.Messages {
+		if got.Messages[i].Role == "assistant" {
+			assistant = &got.Messages[i]
+		}
+	}
+	if assistant == nil {
+		t.Fatal("no assistant turn stored")
+	}
+	if assistant.Model != "model-b" {
+		t.Errorf("assistant turn recorded model %q, want model-b -- without it a later model "+
+			"reads these words as its own", assistant.Model)
+	}
+	for _, m := range got.Messages {
+		if m.Role == "user" && m.Model != "" {
+			t.Errorf("user turn carries model %q; only assistant turns have an author", m.Model)
+		}
+	}
+}

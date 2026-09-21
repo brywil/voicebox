@@ -148,8 +148,25 @@ func (h *voicebox) Compact(ctx context.Context, id string, backendID string, mod
 		sb.WriteString(sess.Summary)
 		sb.WriteString("\n\nSubsequent transcript:\n")
 	}
+	// Attribute assistant turns, but ONLY when this span actually crosses a model change.
+	// A summary of turns from one model is one voice and labels would be noise; a summary
+	// spanning a switch blends two models into a single first-person account, and unlike the
+	// verbatim tail -- where buildContext can label turns on the fly, because the original
+	// Model is still attached -- the summary is flattened text that outlives that distinction.
+	// Whatever is lost here cannot be recovered later.
+	attribute := spansModels(toSummarise)
+	if attribute {
+		sb.WriteString("This conversation was handled by more than one model. Assistant turns " +
+			"are labelled with the model that produced them; keep that distinction in the " +
+			"notes wherever it matters.\n\n")
+	}
 	for _, m := range toSummarise {
 		sb.WriteString(m.Role)
+		if attribute && m.Role == "assistant" && m.Model != "" {
+			sb.WriteString(" (")
+			sb.WriteString(m.Model)
+			sb.WriteString(")")
+		}
 		sb.WriteString(": ")
 		sb.WriteString(m.Content)
 		sb.WriteString("\n\n")
@@ -213,6 +230,25 @@ func (h *voicebox) Compact(ctx context.Context, id string, backendID string, mod
 	log.Printf("[compact] %s: %d messages -> summary, ~%d tokens -> ~%d (through seq %d)",
 		id, len(toSummarise), before, after.estTokensFrom(after.CompactedThrough), through)
 	return nil
+}
+
+// spansModels reports whether these turns came from more than one model. Turns with no model
+// recorded (user turns, and assistant turns stored before attribution existed) are ignored
+// rather than counted as a distinct model: an old transcript should not start claiming it
+// crossed a switch it never made.
+func spansModels(msgs []Message) bool {
+	seen := ""
+	for _, m := range msgs {
+		if m.Role != "assistant" || m.Model == "" {
+			continue
+		}
+		if seen == "" {
+			seen = m.Model
+		} else if m.Model != seen {
+			return true
+		}
+	}
+	return false
 }
 
 // --- WHEN TO COMPACT -------------------------------------------------------------------

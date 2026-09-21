@@ -134,7 +134,10 @@ func (h *voicebox) withSession(w http.ResponseWriter, r *http.Request, body []by
 			// matters -- the question survives a refresh even when the answer does not.
 			return
 		}
-		if _, err := h.store.Append(sid, origin, Message{Role: "assistant", Content: text}); err != nil {
+		// Stamped with the model that produced it: the picker can change the model mid
+		// conversation, and a later turn must be able to tell whose words these were.
+		if _, err := h.store.Append(sid, origin,
+			Message{Role: "assistant", Content: text, Model: modelOf(body)}); err != nil {
 			log.Printf("[sessions] append assistant turn: %v", err)
 			return
 		}

@@ -40,6 +40,19 @@ type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 	TS      int64  `json:"ts"`
+	// Model records WHICH model produced an assistant turn, and is empty on user turns.
+	//
+	// Needed because the picker lets the model change mid-conversation while the turns before
+	// the switch stay verbatim in the context. Without this the incoming model reads its
+	// predecessor's words as its own first-person history and tries to reconcile them with its
+	// own system prompt. openclaw-go hit exactly this (commit 5104a5a) after swapping the
+	// backend three times in one evening: the observed symptom was a model going in circles
+	// over whether it was the large or the small one, because it was reading turns another
+	// model had written as itself.
+	//
+	// Stored, and sent to the client, but never sent back to a backend as part of a message --
+	// buildContext renders it into the text of turns from a DIFFERENT model and drops the field.
+	Model string `json:"model,omitempty"`
 }
 
 type Session struct {

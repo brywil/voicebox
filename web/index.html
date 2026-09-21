@@ -474,7 +474,24 @@ function buildContext() {
     msgs.push({ role: "system",
       content: "Notes from earlier in this conversation:\n" + summaryText });
   }
-  for (const m of history) msgs.push(m);
+  const current = modelEl.value;
+  for (const m of history) {
+    let content = m.content;
+    // A turn produced by a DIFFERENT model is labelled; a model reading its own words sees
+    // exactly what it saw before and pays nothing for this. Without the label the incoming
+    // model reads its predecessor's turns as its own first-person history and tries to
+    // reconcile them with its own system prompt -- openclaw-go 5104a5a, where a model went in
+    // circles over which model it was after a mid-conversation swap.
+    //
+    // Rendered here rather than stored, like INPUT_MODE_PREAMBLE above: the transcript keeps
+    // what was actually said, and switching the model again changes which turns get labelled.
+    if (m.role === "assistant" && m.model && m.model !== current) {
+      content = `[written by ${m.model}, a different model]\n${content}`;
+    }
+    // Only role and content go upstream. `model` is bookkeeping for this page; an unrecognised
+    // field on a message is ignored by some backends and rejected by others.
+    msgs.push({ role: m.role, content });
+  }
   return msgs;
 }
 
@@ -505,7 +522,7 @@ async function sessionLoad(id, { silent = false } = {}) {
   // context is small while this page ships summary-plus-everything; the hard threshold
   // under-counts, never fires, and the backend silently drops the front of the conversation.
   for (const m of d.messages) {
-    if (m.seq > compactedThrough) history.push({ role: m.role, content: m.content });
+    if (m.seq > compactedThrough) history.push({ role: m.role, content: m.content, model: m.model });
     renderMessage(m);
   }
   sessionSubscribe();
@@ -579,7 +596,7 @@ function sessionSubscribe() {
         summaryText = d.summary || "";
         // Drop the turns the summary now covers from what we will resend.
         history = d.messages.filter((m) => m.seq > compactedThrough)
-                            .map((m) => ({ role: m.role, content: m.content }));
+                            .map((m) => ({ role: m.role, content: m.content, model: m.model }));
         showCompactionMarker(`⋯ ${compactedThrough} earlier turns summarised`, false);
       }).catch(() => {});
       return;
@@ -592,7 +609,7 @@ function sessionSubscribe() {
       // Our own turns are already on screen -- the user's was rendered as they sent it and
       // the reply streamed in live. Re-rendering the echo would duplicate both.
       if (ev.origin === CLIENT_ID) continue;
-      history.push({ role: m.role, content: m.content });
+      history.push({ role: m.role, content: m.content, model: m.model });
       renderMessage(m);
       status(`synced from another device — ${m.role}`);
     }
@@ -1334,7 +1351,7 @@ async function send(userText, source = "typed") {
     speakStreaming("", true);
     toolLines.delete("__progress");
     addReplay(out, full);
-    history.push({ role: "assistant", content: full });
+    history.push({ role: "assistant", content: full, model: modelEl.value });
     status(thinking
       ? `ok — ${full.length} chars (+${thinking.length} thinking, not spoken)`
       : `ok — ${full.length} chars`);
