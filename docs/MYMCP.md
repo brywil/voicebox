@@ -135,3 +135,29 @@ searches and then cannot read what it found. The fix, if it stops being acceptab
 mymcp rather than here — `directFetch` should refuse loopback, private and link-local
 destinations, which also covers goclaw's instance. Note that instance may legitimately want to
 fetch localhost, so the guard wants a flag rather than a hard block.
+
+## Catalog as of 2026-09-21: thirteen tools
+
+Added after `web_fetch`: `memory_list`, `parse_json`, and read-only filesystem
+(`read_file`, `list_directory`, `find_files`, `grep`). All smoke-tested through the voicebox
+token before being handed over.
+
+**`--tools` MUST BE ON ONE LINE WITH NO SPACES.** systemd splits `ExecStart` into argv on
+whitespace, so wrapping the list across continuation lines for readability silently truncates
+it: the first chunk becomes the `--tools` value and every later chunk becomes a trailing
+positional argument that mymcp ignores without complaint. Observed exactly once, here — the
+list went from thirteen tools to four, and the four that survived were the first line. Nothing
+errored, the unit was `active`, and the assistant would simply have had no memory.
+
+**Workspace confinement is real, and was verified rather than assumed.** `--workspace` is
+`~/.local/share/voicebox/scratch`, and all three escape attempts are refused:
+
+    read_file /etc/passwd                -> path escape detected ... is outside .../scratch
+    read_file ../../../../.ssh/id_rsa    -> path escape detected: /home/bryan/.ssh/id_rsa
+    list_directory /home/bryan           -> path escape detected
+
+So the filesystem tools see one directory and nothing above it. Note `web_fetch` caches into
+that same directory, so `grep` will turn up the text of pages fetched earlier — harmless, but
+it means the workspace is not empty of content the user did not put there.
+
+`parse_json` takes `input` or `url` (plus `keys`, `indent`) — not `json`.
