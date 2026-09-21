@@ -21,6 +21,12 @@
     --mono: ui-monospace, "SF Mono", Menlo, monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* Pull-to-refresh is a property of the ROOT scroller. #log already sets
+     overscroll-behavior, but that only stops chaining OUT of #log -- a swipe starting on the
+     header, the footer, or any gap between them reaches the root untouched and refreshes the
+     page, losing the conversation. On a phone that gesture is one mis-swipe from a scroll.
+     Sessions now survive a refresh, but not losing it in the first place is still better. */
+  html { overscroll-behavior-y: none; }
   body {
     background: var(--bg); color: var(--text); height: 100dvh; display: flex; flex-direction: column;
     font: 15px/1.55 system-ui, -apple-system, sans-serif;
@@ -82,6 +88,18 @@
      will not shrink below its content, so without it a long conversation grows
      the log and pushes the footer off the bottom of the screen rather than
      scrolling inside it. */
+  /* Compaction has to be VISIBLE. It runs server-side and asynchronously, so it never delays
+     the turn that triggers it -- but it occupies a backend slot, and on a single-slot
+     llama-server the NEXT turn queues behind it (measured: a 5-token turn took 5.04s instead
+     of 0.3s). Unannounced that is indistinguishable from the model hanging. The marker also
+     stays in the log afterwards so that if a reply seems to have forgotten something, it is
+     possible to see at a glance whether compaction is why. */
+  .compaction {
+    align-self: center; margin: 10px 0; padding: 3px 10px; border-radius: 10px;
+    font: 12px/1.5 var(--mono); color: var(--muted);
+    background: var(--panel); border: 1px dashed var(--edge);
+  }
+  .compaction.active { color: var(--warn); border-style: solid; }
   #log {
     flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
     padding: 18px 16px; display: flex; flex-direction: column; gap: 14px;
@@ -229,6 +247,17 @@
     <label class="chk"><input type="checkbox" id="speakThink" />
       Read the reasoning aloud, as an aside</label>
     <label class="row" id="thinkVoiceRow"><span>Aside voice</span><select id="thinkVoice"></select></label>
+  </section>
+
+  <section>
+    <div class="phead" style="padding-left:0;padding-right:0;border:0">Conversations</div>
+    <label class="row"><span>Session</span><select id="sessionSel"></select></label>
+    <div class="row" style="gap:6px">
+      <button id="sessNew">New</button>
+      <button id="sessRename">Rename</button>
+      <button id="sessDelete">Delete</button>
+    </div>
+    <div class="row"><span id="sessInfo" style="font:12px/1.4 var(--mono);color:var(--muted)"></span></div>
   </section>
 
   <section>
@@ -384,6 +413,197 @@ function addMsg(who, text, cls = "") {
   logEl.scrollTop = logEl.scrollHeight;
   return row.querySelector(".body");
 }
+
+// --- sessions ---------------------------------------------------------------
+//
+// The conversation lives on the SERVER now. The page holds a view of it, not the original.
+// That is what makes a refresh survivable, and what lets the phone, the iPad and the laptop
+// see the same conversation -- localStorage could do neither: it is per-browser and it is not
+// meant to hold megabytes of transcript.
+//
+// localStorage keeps exactly ONE thing: which session is current. That is the job it is
+// actually good at -- tiny, disposable, and if it is lost you land in the picker rather than
+// losing anything.
+
+// A per-tab id so this device can recognise the echo of its own turns coming back over the
+// event stream. Without it, everything you say would render twice: once locally as you send
+// it, once again when the server broadcasts it.
+const CLIENT_ID = (crypto.randomUUID?.() || String(Math.random())).slice(0, 12);
+
+let sessionId = localStorage.getItem("vb.session") || null;
+let sessionHead = 0;          // highest seq this page has rendered
+let compactedThrough = 0;     // everything at or below this is represented by summary
+let summaryText = "";
+let sessionES = null;         // EventSource
+let compactingEl = null;      // the transient "compacting" marker, if one is showing
+
+const sessionSel = $("sessionSel");
+
+// renderMessage replays one stored turn into the log.
+//
+// Two fidelity details that a naive replay gets wrong. The [voice] marker is STORED but
+// deliberately never SHOWN -- the user knows how they typed it and echoing the marker back is
+// noise. And assistant turns need their replay button re-attached, or a restored conversation
+// silently loses the ability to speak its own replies.
+function renderMessage(m) {
+  if (m.role === "user") {
+    addMsg("you", stripTag(m.content));
+  } else if (m.role === "assistant") {
+    const out = addMsg("bot", m.content);
+    addReplay(out, m.content);
+  }
+}
+
+function showCompactionMarker(text, active) {
+  const d = document.createElement("div");
+  d.className = "compaction" + (active ? " active" : "");
+  d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+  return d;
+}
+
+// buildContext produces the messages array sent to the model.
+//
+// This is where compaction is honoured: everything at or below compactedThrough is represented
+// by the summary instead of being resent. Ignoring it would send turns the summary already
+// covers -- the conversation would keep growing and compaction would achieve nothing.
+function buildContext() {
+  const msgs = [];
+  if (summaryText) {
+    msgs.push({ role: "system",
+      content: "Notes from earlier in this conversation:\n" + summaryText });
+  }
+  for (const m of history) msgs.push(m);
+  return msgs;
+}
+
+async function sessionLoad(id, { silent = false } = {}) {
+  const r = await fetch(`/api/sessions/${id}?limit=80`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d = await r.json();
+  sessionId = d.id;
+  localStorage.setItem("vb.session", sessionId);
+  sessionHead = d.head || 0;
+  compactedThrough = d.compacted_through || 0;
+  summaryText = d.summary || "";
+  history = [];
+  logEl.innerHTML = "";
+  if (d.truncated) {
+    showCompactionMarker(`⋯ earlier turns not shown (${d.total} total)`, false);
+  }
+  if (summaryText) {
+    showCompactionMarker(`⋯ ${compactedThrough} earlier turns summarised`, false);
+  }
+  for (const m of d.messages) {
+    history.push({ role: m.role, content: m.content });
+    renderMessage(m);
+  }
+  sessionSubscribe();
+  if (!silent) status(`resumed "${d.title || "untitled"}" — ${d.total} turns`);
+  return d;
+}
+
+async function sessionNew() {
+  const r = await fetch("/api/sessions", { method: "POST", body: "{}" });
+  const d = await r.json();
+  sessionId = d.id;
+  localStorage.setItem("vb.session", sessionId);
+  sessionHead = 0; compactedThrough = 0; summaryText = "";
+  history = []; logEl.innerHTML = "";
+  sessionSubscribe();
+  await sessionRefreshList();
+  return d;
+}
+
+// sessionSubscribe opens the live stream.
+//
+// EventSource reconnects on its own and resends Last-Event-ID, and the server replays
+// everything after that seq -- so a phone that sleeps, changes network or is backgrounded
+// closes its own gap with no logic here. `since` seeds the FIRST connection so a page that has
+// just replayed its history does not immediately receive it all again.
+function sessionSubscribe() {
+  if (sessionES) { sessionES.close(); sessionES = null; }
+  if (!sessionId) return;
+  const es = new EventSource(`/api/sessions/${sessionId}/events?since=${sessionHead}`);
+  sessionES = es;
+  es.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.kind === "compacting") {
+      if (!compactingEl) compactingEl = showCompactionMarker("⋯ compacting conversation…", true);
+      return;
+    }
+    if (ev.kind === "compact_failed") {
+      if (compactingEl) { compactingEl.remove(); compactingEl = null; }
+      return;
+    }
+    if (ev.kind === "compact") {
+      if (compactingEl) { compactingEl.remove(); compactingEl = null; }
+      // Re-read rather than guess: the server decides how far the summary reaches.
+      fetch(`/api/sessions/${sessionId}?limit=0`).then((r) => r.json()).then((d) => {
+        compactedThrough = d.compacted_through || 0;
+        summaryText = d.summary || "";
+        // Drop the turns the summary now covers from what we will resend.
+        history = d.messages.filter((m) => m.seq > compactedThrough)
+                            .map((m) => ({ role: m.role, content: m.content }));
+        showCompactionMarker(`⋯ ${compactedThrough} earlier turns summarised`, false);
+      }).catch(() => {});
+      return;
+    }
+    // kind: commit
+    for (const m of ev.msgs || []) {
+      if (m.seq <= sessionHead) continue;   // already have it
+      sessionHead = m.seq;
+      // Our own turns are already on screen -- the user's was rendered as they sent it and
+      // the reply streamed in live. Re-rendering the echo would duplicate both.
+      if (ev.origin === CLIENT_ID) continue;
+      history.push({ role: m.role, content: m.content });
+      renderMessage(m);
+      status(`synced from another device — ${m.role}`);
+    }
+  };
+  es.onerror = () => { /* EventSource retries on its own; nothing useful to do here */ };
+}
+
+async function sessionRefreshList() {
+  try {
+    const r = await fetch("/api/sessions");
+    const list = await r.json();
+    sessionSel.innerHTML = "";
+    for (const m of list) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      const when = new Date(m.updated).toLocaleString([], { month: "short", day: "numeric",
+        hour: "2-digit", minute: "2-digit" });
+      o.textContent = `${m.title || "untitled"} — ${m.count} · ${when}`;
+      sessionSel.appendChild(o);
+    }
+    if (sessionId) sessionSel.value = sessionId;
+    const cur = list.find((m) => m.id === sessionId);
+    $("sessInfo").textContent = cur ? `${cur.count} turns` : `${list.length} saved`;
+  } catch (e) { console.warn("[sessions] list failed:", e); }
+}
+
+sessionSel.onchange = async () => {
+  try { await sessionLoad(sessionSel.value); await sessionRefreshList(); }
+  catch (e) { status("could not open that conversation: " + e.message, "err"); }
+};
+$("sessNew").onclick = async () => { await sessionNew(); status("new conversation"); };
+$("sessRename").onclick = async () => {
+  if (!sessionId) return;
+  const title = prompt("Name this conversation:", sessionSel.selectedOptions[0]?.textContent || "");
+  if (title === null) return;
+  await fetch(`/api/sessions/${sessionId}`, { method: "PATCH",
+    body: JSON.stringify({ title }) });
+  await sessionRefreshList();
+};
+$("sessDelete").onclick = async () => {
+  if (!sessionId || !confirm("Delete this conversation? This cannot be undone.")) return;
+  await fetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+  localStorage.removeItem("vb.session");
+  await sessionNew();
+  status("deleted");
+};
 
 // --- backends ---------------------------------------------------------------
 async function loadBackends() {
@@ -985,16 +1205,24 @@ async function send(userText, source = "typed") {
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Voicebox-Backend": backendEl.value },
+      headers: {
+        "Content-Type": "application/json", "X-Voicebox-Backend": backendEl.value,
+        // The server persists the turn and fans it out to the other devices. Without the
+        // session header it simply does not, and the request behaves exactly as it used to.
+        ...(sessionId ? { "X-Voicebox-Session": sessionId, "X-Voicebox-Client": CLIENT_ID } : {}),
+      },
       // Built per request rather than stored in history, so toggling the
       // checkbox takes effect immediately instead of only for new conversations.
       body: JSON.stringify(applyEffort({
         model: modelEl.value, stream: true,
         // Read at request time, so toggling it takes effect on the next turn.
         ...($("useTools").checked && SERVER_TOOLS ? { voicebox_tools: true } : {}),
+        // buildContext() puts the compaction summary in front of the surviving turns, so
+        // turns the summary already covers are not resent. `history` holds only those
+        // surviving turns -- the compact event prunes it.
         messages: ($("tagInput").checked && history.some((m) => m.content.startsWith("[voice] ")))
-          ? [{ role: "system", content: INPUT_MODE_PREAMBLE }, ...history]
-          : history.map((m) => ({ ...m, content: stripTag(m.content) })),
+          ? [{ role: "system", content: INPUT_MODE_PREAMBLE }, ...buildContext()]
+          : buildContext().map((m) => ({ ...m, content: stripTag(m.content) })),
       })),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -1559,8 +1787,13 @@ textEl.addEventListener("keydown", (e) => {
     if (sttEngine() === "keyboard") setTimeout(() => textEl.focus(), 0);
   }
 });
-$("clear").onclick = () => {
-  history = []; logEl.innerHTML = ""; stopSpeaking(); setPanel(false); status("cleared");
+$("clear").onclick = async () => {
+  stopSpeaking(); setPanel(false);
+  // Starts a NEW conversation rather than destroying this one: with a picker, "clear" means
+  // "set this aside", and the old conversation stays available. Delete is a separate control
+  // for when erasing is actually what is wanted.
+  try { await sessionNew(); status("new conversation"); }
+  catch { history = []; logEl.innerHTML = ""; status("cleared"); }
 };
 $("speak").onchange = updateCrumb;
 ttsEngineEl.addEventListener("change", updateCrumb);
@@ -1597,8 +1830,25 @@ ttsEngineEl.addEventListener("change", updateCrumb);
   // recogniser that was not going to run.
   await applySttEngine();
   syncThinkVoices();
+  // RESUME. Silent and automatic: a refresh should be invisible, which was the whole point.
+  // Any failure here falls back to a fresh session rather than blocking boot -- the page is
+  // worth keeping usable even when the store is not.
+  try {
+    if (sessionId) {
+      await sessionLoad(sessionId, { silent: true });
+    } else {
+      await sessionNew();
+    }
+    await sessionRefreshList();
+  } catch (e) {
+    console.warn("[sessions] resume failed:", e);
+    try { await sessionNew(); await sessionRefreshList(); }
+    catch { status("conversations unavailable — this turn will not be saved", "warn"); }
+  }
+
   updateCrumb();
-  status(`ready [build ${BUILD}] — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}`);
+  const resumed = history.length ? `, resumed ${history.length} turns` : "";
+  status(`ready [build ${BUILD}] — ${sttEngineEl.options[sttEngineEl.selectedIndex]?.textContent || "?"}, chat via ${backendEl.value}${resumed}`);
  } catch (e) {
   // Never leave the status bar reading "starting" forever. A boot that dies
   // silently is indistinguishable from one that is merely slow, and typing
