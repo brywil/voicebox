@@ -26,6 +26,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -49,6 +50,9 @@ type voicebox struct {
 	cfg      *Config
 	mcp      *MCPClient
 	upstream *http.Client
+	// store is nil when sessions are disabled, and every session route stays unregistered in
+	// that case -- so the feature is genuinely absent rather than present and erroring.
+	store *Store
 }
 
 type Config struct {
@@ -91,7 +95,22 @@ func main() {
 		upstream: &http.Client{},
 	}
 
+	// Sessions live outside the repo, under the user's data dir, so conversations survive a
+	// reinstall and are not accidentally committed. Failure to open the store is NOT fatal:
+	// voicebox is useful without persistence, and refusing to start would turn a storage
+	// problem into a total outage of a thing that was working yesterday.
+	if dir := sessionDir(); dir != "" {
+		st, err := NewStore(dir)
+		if err != nil {
+			log.Printf("[sessions] disabled: %v", err)
+		} else {
+			vb.store = st
+			log.Printf("[sessions] storing conversations in %s", dir)
+		}
+	}
+
 	mux := http.NewServeMux()
+	vb.registerSessionRoutes(mux)
 
 	// The browser asks which backends exist. Keys are deliberately absent from
 	// this payload -- it reports only whether one is CONFIGURED, so the UI can
@@ -333,6 +352,23 @@ func envOf(k string) string { return os.Getenv(k) }
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// sessionDir resolves where conversations are kept. XDG_DATA_HOME when set, otherwise the
+// conventional ~/.local/share. Empty means no home directory could be determined, and sessions
+// stay disabled rather than being written somewhere surprising.
+func sessionDir() string {
+	if d := os.Getenv("VOICEBOX_SESSIONS"); d != "" {
+		return d
+	}
+	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
+		return filepath.Join(d, "voicebox", "sessions")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "voicebox", "sessions")
 }
 
 func portOf(listen string) string {

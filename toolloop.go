@@ -75,6 +75,13 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Session persistence wraps BOTH downstream paths -- the plain proxy below and the agentic
+	// loop -- because both emit OpenAI-format SSE through this same writer. Hooking here once
+	// rather than in each path means neither can be changed later into silently not saving.
+	// With no session header this returns w unchanged and a no-op commit.
+	w, commitSession := h.withSession(w, r, body)
+	defer commitSession()
+
 	// Tools only when the client asked AND a tool server is configured. Without
 	// both, this is a plain proxy and behaves exactly as before.
 	wantTools, _ := raw["voicebox_tools"].(bool)
