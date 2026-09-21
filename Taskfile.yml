@@ -25,11 +25,13 @@ tasks:
     cmds: [go test ./...]
 
   check:
-    desc: "gofmt check + vet + test"
+    desc: "gofmt check + vet + test (gates deploy)"
     cmds:
       - test -z "$(gofmt -l . | grep -v '^{{.VENV}}/')" || { echo 'gofmt needed:'; gofmt -l .; exit 1; }
       - go vet ./...
-      - go test ./...
+      # Calls the `test` task rather than repeating `go test ./...`, so there is ONE definition
+      # of what testing means and `task deploy` cannot drift from `task test`.
+      - task: test
 
   venv:
     desc: "Create the Python venv and install piper-tts (first run only)"
@@ -81,8 +83,12 @@ tasks:
       - mv -f {{.INSTALL_DIR}}/{{.BINARY}}.new {{.INSTALL_DIR}}/{{.BINARY}}
 
   deploy:
-    desc: "Check, build, restart both services, verify they answer"
+    desc: "Test, check, build, restart both services, verify they answer"
     cmds:
+      # check runs gofmt, vet and the full test suite. A failure here stops the deploy: the
+      # tests cover things that fail SILENTLY in production (persistence quietly not
+      # persisting, compaction quietly not compacting), so shipping past a red suite would
+      # not announce itself.
       - task: check
       - task: install
       - '{{.SC}} restart voicebox-tts || true'
