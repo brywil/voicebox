@@ -38,12 +38,12 @@ type Backend struct {
 	// APIKeyEnv names an environment variable holding a bearer token. The token
 	// itself is never written to config and never reaches the browser.
 	APIKeyEnv string `json:"api_key_env,omitempty"`
-	// Context is the model's window in tokens. Configured rather than probed because the
-	// three backend families expose it three different ways (llama.cpp /props, ollama
-	// /api/show, cloud APIs not at all) and a wrong guess is worse than none: too low and
-	// conversations are compacted that did not need it, too high and the request is silently
-	// truncated by the backend, which is the failure nobody notices. Zero disables
-	// compaction for this backend.
+	// Context OVERRIDES the window used for compaction planning. Leave it unset for a
+	// llama.cpp backend: the live per-slot context is probed from /props (see ctxprobe.go),
+	// which cannot go stale when the server is restarted with a different -c. Set it when the
+	// backend does not report one, or when you would rather not drive a shared server to its
+	// actual limit. Zero and unprobeable means compaction stays off for this backend rather
+	// than guessing a window.
 	Context int `json:"context,omitempty"`
 	// CompactAt is the fraction of Context at which compaction triggers. Default 0.6, which
 	// leaves room for the reply plus several more turns before it fires again.

@@ -241,12 +241,20 @@ const defaultKeepVerbatim = 6
 // failing to compact ones that did.
 func (h *voicebox) compactBudget(backendID string) int {
 	b := h.cfg.find(orDefault(backendID, h.cfg.Default))
-	if b == nil || b.Context <= 0 {
+	if b == nil {
+		return 0
+	}
+	// Probed from the live backend when not configured -- llama.cpp reports its per-slot
+	// context on /props, so the window does not have to be maintained by hand and cannot go
+	// stale when the server is restarted with a different -c. Still 0 for backends that do
+	// not report one, which leaves compaction off rather than guessing.
+	ctx := h.contextFor(b)
+	if ctx <= 0 {
 		return 0
 	}
 	frac := b.CompactAt
 	if frac <= 0 || frac >= 1 {
 		frac = 0.6
 	}
-	return int(float64(b.Context) * frac)
+	return int(float64(ctx) * frac)
 }
