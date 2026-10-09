@@ -13,6 +13,8 @@ package main
 // so ordinary refactoring does not break them.
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -355,4 +357,26 @@ func blankLiterals(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// The page must name what a port is serving NOW, not what config.json says it served once: port 8085 hosted Ornith
+// and then Kolibri, and the static label kept saying Ornith.
+func TestLiveModelNamesTheServedModel(t *testing.T) {
+	one := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"/home/bryan/models-prod/Kolibri-1-APEX-i-quality.gguf","meta":{"n_ctx":262144}}]}`))
+	}))
+	defer one.Close()
+	many := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"a"},{"id":"b"}]}`))
+	}))
+	defer many.Close()
+	if got := liveModel(&Backend{ID: "x", URL: one.URL}); got != "Kolibri-1-APEX-i-quality" {
+		t.Errorf("single-model server: got %q", got)
+	}
+	if got := liveModel(&Backend{ID: "y", URL: many.URL}); got != "" {
+		t.Errorf("multi-model server must not be labelled with one model: got %q", got)
+	}
+	if got := liveModel(&Backend{ID: "z", URL: "http://127.0.0.1:1"}); got != "" {
+		t.Errorf("a down backend must give no label suffix: got %q", got)
+	}
 }

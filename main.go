@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -145,9 +146,22 @@ func main() {
 			Backends  []view `json:"backends"`
 		}{Default: cfg.Default, Build: buildID(*webDir), ServerTTS: cfg.ttsProxy != nil,
 			Tools: mcpClient != nil}
-		for _, b := range cfg.Backends {
+		// Complete each label with what the server is serving now (probed in parallel, 3 s cap each), so a
+		// model swap behind a port can never leave the page naming the previous model.
+		live := make([]string, len(cfg.Backends))
+		var wg sync.WaitGroup
+		for i := range cfg.Backends {
+			wg.Add(1)
+			go func(i int) { defer wg.Done(); live[i] = liveModel(cfg.Backends[i]) }(i)
+		}
+		wg.Wait()
+		for i, b := range cfg.Backends {
+			label := b.Label
+			if live[i] != "" && !strings.Contains(label, live[i]) {
+				label += " — " + live[i]
+			}
 			out.Backends = append(out.Backends, view{
-				ID: b.ID, Label: b.Label,
+				ID: b.ID, Label: label,
 				NeedsKey: b.APIKeyEnv != "",
 				HasKey:   b.APIKeyEnv == "" || os.Getenv(b.APIKeyEnv) != "",
 			})

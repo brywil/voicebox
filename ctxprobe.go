@@ -44,6 +44,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,24 @@ func num(m map[string]any, keys ...string) int {
 		return int(f)
 	}
 	return 0
+}
+
+// liveModel names the model a backend is serving RIGHT NOW, from /v1/models -- or "" when that is not one
+// unambiguous model (a multi-model server like ollama cloud, or a backend that is down). Port 8085 is whichever
+// production model is loaded, so a label written into config.json ("Ornith ...") goes stale on the first model
+// swap; the label shown to the user is completed with this instead.
+func liveModel(b *Backend) string {
+	d, err := getJSON(shortClient, b, "/v1/models", nil)
+	if err != nil {
+		return ""
+	}
+	arr, _ := d["data"].([]any)
+	if len(arr) != 1 {
+		return ""
+	}
+	m, _ := arr[0].(map[string]any)
+	id, _ := m["id"].(string)
+	return strings.TrimSuffix(filepath.Base(id), ".gguf")
 }
 
 // ctxFromModels reads the live window out of the OpenAI-compatible model list.
