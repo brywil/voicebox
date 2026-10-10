@@ -196,21 +196,21 @@ answers one question about each new user message -- *"Is this statement nonsense
 forward pass with no output tokens (`guard_server.py`, unit `voicebox-guard`, ~6.5 GB on the GPU). At or above the
 threshold voicebox appends
 
-    <preflight>this may rest on a nonsensical premise</preflight>
+    [Note: this may rest on a nonsensical premise.]
 
-to that message, and the page shows `· preflight: ... note added`. Measured in `gguf-quant-lab/experiments/liquid-d1`
+to that message, and the page shows `· guard: ... note added`. Measured in `gguf-quant-lab/experiments/liquid-d1`
 and `laya-guard` (BullshitBench + 55 sound controls, Ornith-1.5):
 
-| | nonsense questions | sound questions |
-|---|---:|---:|
-| no guard | 0.859 | 0.955 |
-| a note on EVERY message | 0.98-1.00 | 0.76-0.88 |
-| **guard-gated note (t 0.5)** | **~0.90** | **~0.93** |
+| | Ornith nonsense | Ornith sound | Kolibri nonsense | Kolibri sound |
+|---|---:|---:|---:|---:|
+| no guard | 0.859 | 0.955 | 0.218 | 0.973 |
+| this note on EVERY message | 1.000 | 0.827 | 0.695 | 0.759 |
+| **guard-gated (t 0.5)** | **0.895** | **0.927** | **0.427** | **0.955** |
 
 The plain question beat a long definitional one on held-out data (AUROC 0.963 vs 0.907) and fired on 0-5% of
-ordinary math, code and instruction prompts. The note's wording mattered more than its wrapper: an instruction
-("check whether this makes sense") cost the most on sound questions; the wrapper itself is almost never repeated
-back, but its wording sometimes is.
+ordinary math, code and instruction prompts. The note's wording mattered more than its wrapper on Ornith: an
+instruction ("check whether this makes sense") cost the most on sound questions. The wrapper is model-specific:
+Kolibri talked about a `<preflight>` tag in 45% of its replies, about the bracketed note in 4%.
 
 **It must never cost a cache miss.** The page sends history without the note, and on a hybrid model (Ornith,
 Kolibri) any change to earlier context re-prefills the whole conversation -- seconds, against the guard's ~60 ms. So:

@@ -17,9 +17,10 @@ import (
 )
 
 // The preflight guard (guard_server.py) scores each user message for "Is this statement nonsense?" and, at or
-// above the threshold, a short note is appended to that message before the model sees it. Measured on Ornith-1.5:
-// BullshitBench 0.86 -> ~0.90 for ~0.03 on sound questions, ~60 ms per message. The note text is the measured
-// best trade between that cost and leakage (the model repeating or discussing the note).
+// above the threshold, a short note is appended to that message before the model sees it. Measured, gated at 0.5:
+// BullshitBench 0.86 -> ~0.90 on Ornith-1.5 and 0.22 -> ~0.43 on Kolibri-1, for ~0.01-0.03 on sound questions,
+// ~60 ms per message. Square brackets, not an XML tag: Kolibri talked about a "<preflight>" tag in 45% of its
+// replies, the bracketed note in 4%; Ornith did neither much.
 //
 // THE NOTE MUST BE RE-APPLIED ON EVERY LATER TURN. The page sends history without it, so adding it only to the
 // newest message would make the next request differ from the last one at that message -- and on a hybrid model
@@ -34,7 +35,7 @@ import (
 // Advisory and fail-open: if the guard is slow or down, the request goes ahead unchanged.
 
 const (
-	defaultGuardNote      = "<preflight>this may rest on a nonsensical premise</preflight>"
+	defaultGuardNote      = "[Note: this may rest on a nonsensical premise.]"
 	defaultGuardThreshold = 0.5
 	defaultGuardTimeout   = 1500 * time.Millisecond
 )
@@ -266,5 +267,5 @@ func (h *voicebox) guardRequest(ctx context.Context, raw map[string]any) string 
 	if !fired {
 		return ""
 	}
-	return fmt.Sprintf("preflight: this may rest on a nonsensical premise (p %.2f) — note added", p)
+	return fmt.Sprintf("guard: this may rest on a nonsensical premise (p %.2f) — note added", p)
 }

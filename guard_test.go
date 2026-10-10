@@ -194,7 +194,7 @@ func TestChatGuardNoteReachesModelAndNoticeReachesPage(t *testing.T) {
 		t.Errorf("model did not receive the note: %q", got)
 	}
 	out := rec.Body.String()
-	if !strings.Contains(out, `"object":"voicebox.event"`) || !strings.Contains(out, "preflight") {
+	if !strings.Contains(out, `"object":"voicebox.event"`) || !strings.Contains(out, "guard:") {
 		t.Errorf("page got no notice:\n%s", out)
 	}
 	if !strings.Contains(out, "That premise does not hold.") {
