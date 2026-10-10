@@ -29,5 +29,9 @@
     "url": "http://127.0.0.1:9445/mcp",
     "token_file": "/home/bryan/.config/mymcp/tokens/voicebox",
     "max_rounds": 32
+  },
+  "guard": {
+    "url": "http://127.0.0.1:8124",
+    "threshold": 0.5
   }
 }

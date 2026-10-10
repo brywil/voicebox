@@ -1,0 +1,203 @@
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// fakeGuard scores a text 0.9 if it contains "nonsense", else 0.1, and records every text it was asked about.
+type fakeGuard struct {
+	mu    sync.Mutex
+	asked []string
+	fail  bool
+}
+
+func (f *fakeGuard) server(t *testing.T) *httptest.Server {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.fail {
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		var req struct{ Texts []string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.asked = append(f.asked, req.Texts...)
+		f.mu.Unlock()
+		p := make([]float64, len(req.Texts))
+		for i, s := range req.Texts {
+			p[i] = 0.1
+			if strings.Contains(s, "nonsense") {
+				p[i] = 0.9
+			}
+		}
+		writeJSON(w, map[string]any{"p": p})
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func msgs(pairs ...string) []any { // role, content, role, content, ...
+	var out []any
+	for i := 0; i < len(pairs); i += 2 {
+		out = append(out, map[string]any{"role": pairs[i], "content": pairs[i+1]})
+	}
+	return out
+}
+
+func content(m any) string { return m.(map[string]any)["content"].(string) }
+
+// THE CACHE RULE. The page sends history without the note; the note given on turn 1 must come back on turn 2
+// byte-identical, or a hybrid model re-prefills the whole conversation. And the old message is not re-checked.
+func TestGuardReplaysTheSameNoteOnLaterTurns(t *testing.T) {
+	f := &fakeGuard{}
+	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
+
+	t1 := msgs("user", "a nonsense question")
+	if _, fired, err := g.Apply(t.Context(), t1); err != nil || !fired {
+		t.Fatalf("turn 1: fired=%v err=%v, want a note", fired, err)
+	}
+	noted := content(t1[0])
+	if !strings.HasSuffix(noted, defaultGuardNote) {
+		t.Fatalf("turn 1 note missing: %q", noted)
+	}
+
+	t2 := msgs("user", "a nonsense question", "assistant", "that makes no sense", "user", "a sound follow-up")
+	_, fired, err := g.Apply(t.Context(), t2)
+	if err != nil || fired {
+		t.Fatalf("turn 2: fired=%v err=%v, want no note on the follow-up", fired, err)
+	}
+	if content(t2[0]) != noted {
+		t.Errorf("turn 2 changed turn 1's message:\n got %q\nwant %q", content(t2[0]), noted)
+	}
+	if content(t2[2]) != "a sound follow-up" {
+		t.Errorf("sound follow-up was edited: %q", content(t2[2]))
+	}
+	if len(f.asked) != 2 || f.asked[1] != "a sound follow-up" {
+		t.Errorf("guard asked %q, want each message checked once", f.asked)
+	}
+}
+
+// History the guard never saw (pre-deployment, lost state) was answered without a note; adding one now would
+// change the prefix. It must stay untouched and must not even be checked.
+func TestGuardNeverNotesUnseenHistory(t *testing.T) {
+	f := &fakeGuard{}
+	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
+	m := msgs("user", "old nonsense", "assistant", "ok", "user", "new and fine")
+	if _, _, err := g.Apply(t.Context(), m); err != nil {
+		t.Fatal(err)
+	}
+	if content(m[0]) != "old nonsense" {
+		t.Errorf("unseen history got a note: %q", content(m[0]))
+	}
+	if len(f.asked) != 1 || f.asked[0] != "new and fine" {
+		t.Errorf("guard asked %q, want only the newest message", f.asked)
+	}
+}
+
+func TestGuardReadsPastTheVoiceTag(t *testing.T) {
+	f := &fakeGuard{}
+	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
+	m := msgs("user", "[voice] whats the capital of sweeden")
+	_, _, _ = g.Apply(t.Context(), m)
+	if len(f.asked) != 1 || f.asked[0] != "whats the capital of sweeden" {
+		t.Errorf("guard asked %q, want the text without [voice]", f.asked)
+	}
+}
+
+// Fail open, and stay consistent: the failed message reached the model without a note, so on the next turn it
+// is history the guard never decided -- exempt, still no note.
+func TestGuardFailsOpenAndStaysConsistent(t *testing.T) {
+	f := &fakeGuard{fail: true}
+	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
+	m := msgs("user", "nonsense while the guard is down")
+	if _, fired, err := g.Apply(t.Context(), m); err == nil || fired {
+		t.Fatalf("want an error and no note, got fired=%v err=%v", fired, err)
+	}
+	if content(m[0]) != "nonsense while the guard is down" {
+		t.Fatalf("message edited despite failure: %q", content(m[0]))
+	}
+	f.fail = false
+	m2 := msgs("user", "nonsense while the guard is down", "assistant", "x", "user", "fine")
+	_, _, _ = g.Apply(t.Context(), m2)
+	if content(m2[0]) != "nonsense while the guard is down" {
+		t.Errorf("a message the model saw without a note got one later: %q", content(m2[0]))
+	}
+}
+
+// A restart must not re-decide: the state file replays the same decision with no guard call at all.
+func TestGuardDecisionsSurviveRestart(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "guard-decisions.jsonl")
+	f := &fakeGuard{}
+	srv := f.server(t)
+	m := msgs("user", "a nonsense question")
+	if _, fired, _ := NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m); !fired {
+		t.Fatal("first run did not fire")
+	}
+	f.fail = true // a restarted guard that cannot be reached must still replay the note
+	m2 := msgs("user", "a nonsense question", "assistant", "x", "user", "and then?")
+	_, _, _ = NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m2)
+	if content(m2[0]) != content(m[0]) {
+		t.Errorf("after restart:\n got %q\nwant %q", content(m2[0]), content(m[0]))
+	}
+}
+
+func TestGuardHandlesArrayContent(t *testing.T) {
+	f := &fakeGuard{}
+	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
+	part := map[string]any{"type": "text", "text": "describe this nonsense"}
+	m := []any{map[string]any{"role": "user", "content": []any{
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:,"}}, part}}}
+	if _, fired, err := g.Apply(t.Context(), m); err != nil || !fired {
+		t.Fatalf("fired=%v err=%v", fired, err)
+	}
+	if !strings.HasSuffix(part["text"].(string), defaultGuardNote) {
+		t.Errorf("text part not noted: %q", part["text"])
+	}
+}
+
+// End to end through handleChat, tools off: the model receives the note and the page receives the notice.
+func TestChatGuardNoteReachesModelAndNoticeReachesPage(t *testing.T) {
+	f := &fakeGuard{}
+	var upstreamBody []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"content":"That premise does not hold."},"finish_reason":"stop"}]}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer up.Close()
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	_ = os.WriteFile(cfgPath, []byte(`{"backends":[{"id":"x","url":"`+up.URL+`"}]}`), 0o600)
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vb := &voicebox{cfg: cfg, upstream: &http.Client{}, guard: NewGuard(GuardConfig{URL: f.server(t).URL}, "")}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"is this nonsense?"}]}`))
+	rec := httptest.NewRecorder()
+	vb.handleChat(rec, req)
+
+	var sent struct{ Messages []map[string]any }
+	if err := json.Unmarshal(upstreamBody, &sent); err != nil {
+		t.Fatalf("upstream body %q: %v", upstreamBody, err)
+	}
+	if got := sent.Messages[0]["content"].(string); !strings.HasSuffix(got, defaultGuardNote) {
+		t.Errorf("model did not receive the note: %q", got)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"object":"voicebox.event"`) || !strings.Contains(out, "preflight") {
+		t.Errorf("page got no notice:\n%s", out)
+	}
+	if !strings.Contains(out, "That premise does not hold.") {
+		t.Errorf("model reply not forwarded:\n%s", out)
+	}
+}

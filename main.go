@@ -68,6 +68,8 @@ type voicebox struct {
 	// store is nil when sessions are disabled, and every session route stays unregistered in
 	// that case -- so the feature is genuinely absent rather than present and erroring.
 	store *Store
+	// guard is nil when no preflight guard is configured (guard.go); requests then pass unchanged.
+	guard *Guard
 }
 
 type Config struct {
@@ -80,6 +82,8 @@ type Config struct {
 	// MCP, when set, enables tool calling. Empty means the proxy behaves exactly
 	// as it did before: no tools, no request parsing.
 	MCP MCPConfig `json:"mcp"`
+	// Guard, when its url is set, enables the preflight nonsense check (guard.go, guard_server.py).
+	Guard GuardConfig `json:"guard"`
 
 	ttsProxy *httputil.ReverseProxy
 }
@@ -108,6 +112,10 @@ func main() {
 		// No timeout: a tool round plus generation can legitimately run for
 		// minutes, and a deadline here would truncate a reply mid-sentence.
 		upstream: &http.Client{},
+		guard:    NewGuard(cfg.Guard, guardStatePath()),
+	}
+	if vb.guard != nil {
+		log.Printf("[guard] preflight check at %s, threshold %.2f", cfg.Guard.URL, vb.guard.cfg.Threshold)
 	}
 
 	// Sessions live outside the repo, under the user's data dir, so conversations survive a
@@ -398,6 +406,14 @@ func sessionDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".local", "share", "voicebox", "sessions")
+}
+
+// guardStatePath keeps the guard's decisions beside the sessions (guard.go explains why they must persist).
+func guardStatePath() string {
+	if d := sessionDir(); d != "" {
+		return filepath.Join(filepath.Dir(d), "guard-decisions.jsonl")
+	}
+	return ""
 }
 
 func portOf(listen string) string {

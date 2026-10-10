@@ -24,8 +24,9 @@ any extension can read it.
 
 | part | language | build |
 |---|---|---|
-| proxy + server (`main.go`, `mcp.go`, `toolloop.go`, `effort.go`) | Go, stdlib only, no dependencies | `go build` |
+| proxy + server (`main.go`, `mcp.go`, `toolloop.go`, `effort.go`, `guard.go`) | Go, stdlib only, no dependencies | `go build` |
 | speech synthesis (`tts_server.py`) | Python + `piper-tts` in a venv | none |
+| preflight guard (`guard_server.py`, optional) | Python + torch/transformers (gguf-quant-lab venv), d1-3B | none |
 | UI (`web/index.html`) | vanilla HTML/JS — no framework, no bundler | none |
 
 `task --list` for everything. On a new machine:
@@ -187,6 +188,42 @@ the answer that follows is the report.
 real failure mode and an expensive one here, since every round is latency heard
 as silence. Hitting the bound is announced rather than passed off as a finished
 answer.
+
+## Preflight guard
+
+Optional (`"guard": {"url": "http://127.0.0.1:8124", "threshold": 0.5}`). A decision model, Liquid's **d1-3B**,
+answers one question about each new user message -- *"Is this statement nonsense?"* -- as a probability, in one
+forward pass with no output tokens (`guard_server.py`, unit `voicebox-guard`, ~6.5 GB on the GPU). At or above the
+threshold voicebox appends
+
+    <preflight>this may rest on a nonsensical premise</preflight>
+
+to that message, and the page shows `· preflight: ... note added`. Measured in `gguf-quant-lab/experiments/liquid-d1`
+and `laya-guard` (BullshitBench + 55 sound controls, Ornith-1.5):
+
+| | nonsense questions | sound questions |
+|---|---:|---:|
+| no guard | 0.859 | 0.955 |
+| a note on EVERY message | 0.98-1.00 | 0.76-0.88 |
+| **guard-gated note (t 0.5)** | **~0.90** | **~0.93** |
+
+The plain question beat a long definitional one on held-out data (AUROC 0.963 vs 0.907) and fired on 0-5% of
+ordinary math, code and instruction prompts. The note's wording mattered more than its wrapper: an instruction
+("check whether this makes sense") cost the most on sound questions; the wrapper itself is almost never repeated
+back, but its wording sometimes is.
+
+**It must never cost a cache miss.** The page sends history without the note, and on a hybrid model (Ornith,
+Kolibri) any change to earlier context re-prefills the whole conversation -- seconds, against the guard's ~60 ms. So:
+
+- a decision is remembered by message text and the same note is re-applied on every later turn, byte-identical;
+- decisions persist in `~/.local/share/voicebox/guard-decisions.jsonl` and are never re-made, since a re-check after
+  a restart could flip a borderline one;
+- only the NEWEST message is ever checked. History the guard never saw (from before it was enabled) is recorded as
+  exempt and never gains a note, because the model already answered it without one;
+- if the guard is slow or down, that one message goes through without a note (fail open) and stays that way; notes
+  on earlier messages are still re-applied.
+
+The stored session keeps the user's own words; the note exists only on the way to the model.
 
 ## Voice vs typed
 

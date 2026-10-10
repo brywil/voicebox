@@ -67,12 +67,22 @@ tasks:
       - cmd: echo "next - put OLLAMA_API_KEY in ~/.config/voicebox/voicebox.env (mode 600), then run - task deploy"
 
   install-units:
-    desc: "Install/update the voicebox and voicebox-tts user units"
+    desc: "Install/update the voicebox, voicebox-tts and voicebox-guard user units"
     cmds:
       - mkdir -p {{.UNIT_DIR}}
-      - cp systemd/voicebox.service systemd/voicebox-tts.service {{.UNIT_DIR}}/
+      - cp systemd/voicebox.service systemd/voicebox-tts.service systemd/voicebox-guard.service {{.UNIT_DIR}}/
       - '{{.SC}} daemon-reload'
       - '{{.SC}} enable voicebox-tts voicebox'
+      # The guard needs a GPU, the d1-3B weights and a torch venv; a machine without them runs voicebox
+      # without it (no "guard" url in config.json), so it is enabled only where asked: task guard-enable.
+
+  guard-enable:
+    desc: "Enable the preflight guard on this machine (needs ~/models-prod/d1-3B and the gguf-quant-lab venv)"
+    cmds:
+      - test -f {{.HOME}}/models-prod/d1-3B/config.json
+      - '{{.SC}} enable --now voicebox-guard'
+      - for i in $(seq 1 60); do curl -sf http://127.0.0.1:8124/health && break; sleep 2; done
+      - cmd: echo 'now add "guard":{"url":"http://127.0.0.1:8124","threshold":0.5} to config.json and run task deploy'
 
   install:
     desc: "Build and install the binary into {{.INSTALL_DIR}}"
@@ -92,6 +102,7 @@ tasks:
       - task: check
       - task: install
       - '{{.SC}} restart voicebox-tts || true'
+      - '{{.SC}} is-enabled -q voicebox-guard && {{.SC}} restart voicebox-guard || true'
       - '{{.SC}} restart voicebox'
       - sleep 3
       - '{{.SC}} is-active voicebox voicebox-tts'

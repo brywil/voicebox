@@ -1,0 +1,16 @@
+[Unit]
+Description=voicebox preflight guard (Liquid d1-3B, "Is this statement nonsense?")
+Documentation=file:///home/bryan/src/voicebox/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/bryan/src/voicebox
+Environment=VOICEBOX_GUARD_MODEL=/home/bryan/models-prod/d1-3B
+ExecStart=/home/bryan/gguf-quant-lab/.venv/bin/python guard_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

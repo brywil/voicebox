@@ -82,28 +82,43 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 	w, commitSession := h.withSession(w, r, body)
 	defer commitSession()
 
+	// The preflight guard edits raw["messages"] in place (guard.go). The session above has already
+	// recorded the user's own text, so the note never enters the stored conversation.
+	notice := h.guardRequest(r.Context(), raw)
+	if h.guard != nil {
+		if nb, err := json.Marshal(raw); err == nil {
+			body = nb
+		}
+	}
+	stream, _ := raw["stream"].(bool)
+
 	// Tools only when the client asked AND a tool server is configured. Without
 	// both, this is a plain proxy and behaves exactly as before.
 	wantTools, _ := raw["voicebox_tools"].(bool)
 	delete(raw, "voicebox_tools") // ours, not the model's
-	if !wantTools || h.mcp == nil {
+	var tools []MCPTool
+	if wantTools && h.mcp != nil {
+		if tools, err = h.mcp.Tools(r.Context()); err != nil {
+			log.Printf("[tools] catalog unavailable (%v); continuing without tools", err)
+			tools = nil
+		}
+	}
+	if len(tools) == 0 {
 		// Logged explicitly: "the model says it has no tools" has two very
 		// different causes -- the client never asked, or it asked and the model
 		// ignored them -- and without this line they look identical from here.
 		log.Printf("[tools] chat on %s WITHOUT tools (client asked=%v, server configured=%v)",
 			backendID, wantTools, h.mcp != nil)
-		h.proxyChat(w, r, b, body)
-		return
+		// A guard notice is a voicebox event, which the plain proxy cannot add to the stream; the
+		// loop can, and with no tools offered it is one round that forwards the model's deltas.
+		if notice == "" || !stream {
+			h.proxyChat(w, r, b, body)
+			return
+		}
+	} else {
+		raw["tools"] = OpenAITools(tools)
+		log.Printf("[tools] chat on %s WITH %d tools offered", backendID, len(tools))
 	}
-
-	tools, err := h.mcp.Tools(r.Context())
-	if err != nil {
-		log.Printf("[tools] catalog unavailable (%v); continuing without tools", err)
-		h.proxyChat(w, r, b, body)
-		return
-	}
-	raw["tools"] = OpenAITools(tools)
-	log.Printf("[tools] chat on %s WITH %d tools offered", backendID, len(tools))
 
 	msgs, _ := raw["messages"].([]any)
 	messages := make([]map[string]any, 0, len(msgs))
@@ -118,6 +133,9 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+	if notice != "" {
+		emitEvent(w, flusher, map[string]any{"notice": notice})
+	}
 
 	maxRounds := h.cfg.MCP.MaxRounds
 	if maxRounds <= 0 {
