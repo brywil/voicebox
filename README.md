@@ -207,6 +207,11 @@ and `laya-guard` (BullshitBench + 55 sound controls, Ornith-1.5):
 | this note on EVERY message | 1.000 | 0.827 | 0.695 | 0.759 |
 | **guard-gated (t 0.5)** | **0.895** | **0.927** | **0.427** | **0.955** |
 
+**Spelling goes first.** One typo multiplies d1's nonsense false fires about 7x on sound sentences ("Ice ockey is a
+sport..." 0.06 -> 0.82); the guard first corrects the message with a masked-LM spelling checker (ModernBERT,
+`typo_check.py` from the experiment, imported rather than copied) and asks the question of the corrected text,
+which undid 22 of 31 such flips. The correction is used only for asking; the model sees the user's own words.
+
 The plain question beat a long definitional one on held-out data (AUROC 0.963 vs 0.907) and fired on 0-5% of
 ordinary math, code and instruction prompts. The note's wording mattered more than its wrapper on Ornith: an
 instruction ("check whether this makes sense") cost the most on sound questions. The wrapper is model-specific:

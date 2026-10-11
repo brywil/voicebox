@@ -8,6 +8,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/bryan/src/voicebox
 Environment=VOICEBOX_GUARD_MODEL=/home/bryan/models-prod/d1-3B
+Environment=VOICEBOX_TYPO_MODEL=/home/bryan/models-prod/modernbert-base
 ExecStart=/home/bryan/gguf-quant-lab/.venv/bin/python guard_server.py
 Restart=always
 RestartSec=5
