@@ -230,6 +230,11 @@ Kolibri) any change to earlier context re-prefills the whole conversation -- sec
 
 The stored session keeps the user's own words; the note exists only on the way to the model.
 
+**Measured live** (2026-10-11, Ornith-1.5 on llama-medium, two-turn conversations through voicebox, llama-server's
+own `prompt_n`): a message the guard fired on cost 42 prompt tokens on turn 1 against 24 for one it did not (the note,
+once), and turn 2 then prefilled **24 tokens in both** -- the replayed note matched the cache exactly. Guard time
+70-250 ms per new message (spelling + d1); a message already decided costs nothing.
+
 ## Voice vs typed
 
 Dictated messages are prefixed `[voice]`, behind a one-line system note. It
