@@ -1632,6 +1632,9 @@ function handleToolEvent(ev, out) {
 function addReplay(out, text) {
   if (!text || !text.trim() || !out.parentNode) return;
   if (out.parentNode.querySelector(".replay")) return;
+  // Every reply with a replay button gets the narration switch too -- including replies restored from the session or
+  // fanned out from another device, which never pass through send().
+  if (!out.parentNode.querySelector(".mute")) addSpeakToggle(out);
   const row = ctlRow(out);
   const b = document.createElement("button");
   b.className = "replay";
