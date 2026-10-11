@@ -149,10 +149,12 @@
      44px is the usual floor for a reliable tap; the primary action gets more. */
   /* Keyboard-dictation mode: no talk button, so the field is the control. */
   body.kbd-mode #text { font-size: 16px; }
-  /* A reply's own controls -- mute while it speaks, replay once it is done -- side by side under it. */
-  .ctl { display: flex; gap: 6px; margin-top: 4px; }
+  /* Replay lives in the empty gutter under BOT, so a reply costs no extra row. */
+  .who .replay { display: block; margin-top: 6px; padding: 2px 8px; font-size: 13px; }
+  #narrate { flex: 0 0 auto; padding: 12px 14px; font-size: 15px; }
+  #narrate.off { color: var(--muted); }
   @media (pointer: coarse) {
-    .replay, .mute { padding: 8px 14px; font-size: 14px; min-height: 40px; }
+    .who .replay { width: 40px; min-height: 40px; padding: 0; font-size: 16px; }
     body.kbd-mode #text { flex: 1 0 100%; min-height: 54px; }
     body.kbd-mode footer { gap: 8px; }
     body { font-size: 16px; }
@@ -165,7 +167,7 @@
     /* The talk button takes its own full-width row: it is the one control you
        aim at without looking, often one-handed. */
     #talk { order: -1; flex: 1 0 100%; min-height: 62px; font-size: 18px; padding: 16px; }
-    #shush { min-width: 62px; min-height: 50px; font-size: 20px; padding: 12px; }
+    #shush, #narrate { min-width: 62px; min-height: 50px; font-size: 20px; padding: 12px; }
     /* 16px is not cosmetic: a smaller font makes mobile browsers zoom the page
        on focus, which then leaves the layout scrolled sideways. */
     #text { min-height: 50px; font-size: 16px; padding: 12px 14px; }
@@ -206,6 +208,8 @@
 <footer>
   <button id="talk" disabled>loading…</button>
   <button id="shush" title="Stop speaking (Esc)" disabled>⏹</button>
+  <!-- The Speak replies setting, one tap away: off silences at once, the reply keeps generating. -->
+  <button id="narrate" title="Narration on — tap to mute">🔊</button>
   <input id="text" placeholder="…or type here and press Enter" />
 </footer>
 
@@ -1256,7 +1260,6 @@ async function send(userText, source = "typed") {
   history.push({ role: "user", content: tag + userText });
 
   const out = addMsg("bot", "", "partial");
-  addSpeakToggle(out);
   // Reasoning models (most of what ollama cloud serves) stream a separate
   // `reasoning` field. It is shown, collapsed, but NEVER spoken -- listening to
   // a model deliberate for thirty seconds before it answers is unusable.
@@ -1632,13 +1635,11 @@ function handleToolEvent(ev, out) {
 function addReplay(out, text) {
   if (!text || !text.trim() || !out.parentNode) return;
   if (out.parentNode.querySelector(".replay")) return;
-  // Every reply with a replay button gets the narration switch too -- including replies restored from the session or
-  // fanned out from another device, which never pass through send().
-  if (!out.parentNode.querySelector(".mute")) addSpeakToggle(out);
-  const row = ctlRow(out);
+  const row = out.closest(".msg")?.querySelector(".who");
+  if (!row) return;
   const b = document.createElement("button");
   b.className = "replay";
-  b.textContent = "🔊 replay";
+  b.textContent = "▶";
   b.title = "Speak this reply again";
   b.onclick = () => {
     stopSpeaking();
@@ -1650,44 +1651,28 @@ function addReplay(out, text) {
   row.appendChild(b);
 }
 
-// ctlRow is the line of controls under a reply, created on first use, so mute and replay sit next to each other.
-function ctlRow(out) {
-  let row = out.parentNode.querySelector(".ctl");
-  if (!row) {
-    row = document.createElement("div");
-    row.className = "ctl";
-    out.parentNode.appendChild(row);
-  }
-  return row;
-}
-
-// The narration switch IS the "Speak replies" setting, reachable under the reply instead of behind ☰, and it acts
+// The narration switch IS the "Speak replies" setting, one tap away in the footer instead of behind ☰, and it acts
 // at once: turning it off silences what is playing and queued, while the reply keeps generating and rendering;
 // turning it on speaks from the next sentence. Unlike ⏹, which clears the queue but lets the next streamed
 // sentence start talking again.
 function setSpeak(on) {
   $("speak").checked = on;
   if (!on) stopSpeaking();
-  for (const b of document.querySelectorAll(".mute")) speakToggleLabel(b);
+  speakToggleLabel(narrateBtn);
   updateCrumb();
   status(on ? "narration on" : "narration off — still generating");
 }
 
 function speakToggleLabel(b) {
   const on = $("speak").checked;
-  b.textContent = on ? "🔇 mute" : "🔈 speak";
-  b.title = on ? "Stop narrating (the reply keeps generating)" : "Narrate replies again";
+  b.textContent = on ? "🔊" : "🔇";
+  b.title = on ? "Narration on — tap to mute (the reply keeps generating)" : "Narration off — tap to speak again";
+  b.classList.toggle("off", !on);
 }
 
-// addSpeakToggle puts the narration switch under a reply as soon as it starts. It never touches the request.
-function addSpeakToggle(out) {
-  if (!out.parentNode) return;
-  const b = document.createElement("button");
-  b.className = "mute";
-  speakToggleLabel(b);
-  b.onclick = () => setSpeak(!$("speak").checked);
-  ctlRow(out).appendChild(b);
-}
+const narrateBtn = $("narrate");
+narrateBtn.onclick = () => setSpeak(!$("speak").checked);
+speakToggleLabel(narrateBtn);
 
 // splitForSpeech breaks a reply into the same sentence-sized pieces the live
 // stream uses, so a replay sounds identical to the original.

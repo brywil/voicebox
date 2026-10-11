@@ -370,7 +370,7 @@ const any = new Proxy(function () {}, {
 let busy = false, curThink = null, history = [];
 const talkBtn = { disabled: false }, talkLabel = any;
 const $ = () => ({ checked: false, value: "", appendChild() {}, scrollTop: 0 });
-const addMsg = () => any, addReplay = () => any, addSpeakToggle = () => any, handleToolEvent = () => any;
+const addMsg = () => any, addReplay = () => any, handleToolEvent = () => any;
 const speakStreaming = async () => {}, speakThinkingStream = async () => {};
 const refreshTalkButton = () => {}, applyEffort = (b) => b, stripTag = (s) => s;
 const status = (m, k) => console.log("STATUS " + k + " " + m);

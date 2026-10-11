@@ -383,11 +383,11 @@ stops it dead and clears the queue; starting to talk does too, so barging in
 works. Without that the only options were waiting it out or reloading.
 
 **Muting without stopping.** `⏹` clears what is queued, but the next streamed
-sentence starts talking again. The `🔇 mute` button under each reply, beside
-`🔊 replay`, is the **Speak replies** setting itself: off silences what is playing
-and queued at once while the reply keeps generating and rendering; `🔈 speak`
-turns narration back on from the next sentence. The checkbox behind ☰ and every
-reply's button stay in step.
+sentence starts talking again. The `🔊`/`🔇` button beside it in the footer is the
+**Speak replies** setting itself: off silences what is playing and queued at once
+while the reply keeps generating and rendering; on narrates again from the next
+sentence. It stays in step with the checkbox behind ☰. Each reply's `▶` replay
+sits in the empty gutter under `BOT`, so replies cost no extra row.
 
 **Thinking aloud.** With "speak thinking" on, the model's reasoning is read in a
 *different voice*, quieter (volume 0.65, measured: peak amplitude 32767 → 21298)
