@@ -22,7 +22,10 @@ import (
 // ~60 ms per message. Square brackets, not an XML tag: Kolibri talked about a "<preflight>" tag in 45% of its
 // replies, the bracketed note in 4%; Ornith did neither much.
 //
-// THE NOTE MUST BE RE-APPLIED ON EVERY LATER TURN. The page sends history without it, so adding it only to the
+// Spelling comes first: the guard corrects typos (a masked-LM checker) before asking, and the corrected text is also
+// what the model gets; the page is told each fix.
+//
+// THE NOTE AND THE CORRECTIONS MUST BE RE-APPLIED ON EVERY LATER TURN. The page sends history without it, so adding it only to the
 // newest message would make the next request differ from the last one at that message -- and on a hybrid model
 // (Ornith, Kolibri) any edit to the context forces a full re-prefill of the whole conversation. Decisions are
 // therefore remembered by message text and replayed, so the prefix the model sees stays byte-identical.
@@ -51,8 +54,8 @@ type Guard struct {
 	cfg    GuardConfig
 	client *http.Client
 	mu     sync.Mutex
-	seen   map[[32]byte]float64 // message text -> P(nonsense)
-	state  string               // append-only decision log; "" keeps decisions in memory only
+	seen   map[[32]byte]decision // message text as sent -> what the guard decided for it
+	state  string                // append-only decision log; "" keeps decisions in memory only
 }
 
 // NewGuard returns nil when no guard is configured. state is the decision log path ("" = memory only).
@@ -70,14 +73,27 @@ func NewGuard(cfg GuardConfig, state string) *Guard {
 	if cfg.TimeoutMS > 0 {
 		t = time.Duration(cfg.TimeoutMS) * time.Millisecond
 	}
-	g := &Guard{cfg: cfg, client: &http.Client{Timeout: t}, seen: map[[32]byte]float64{}, state: state}
+	g := &Guard{cfg: cfg, client: &http.Client{Timeout: t}, seen: map[[32]byte]decision{}, state: state}
 	g.load()
 	return g
+}
+
+// decision is everything the guard ever does to one message, recorded once and replayed on every later turn.
+type decision struct {
+	P     float64 // P(nonsense) of the corrected text; -1 = exempt (history the guard never saw)
+	Fixed string  // the message with spelling corrected; "" = unchanged
 }
 
 type guardRecord struct {
 	K string  `json:"k"` // hex sha256 of the message text as sent
 	P float64 `json:"p"`
+	F string  `json:"f,omitempty"` // corrected text, when spelling was fixed
+}
+
+// checked is one guard answer: the decision plus the fixes made, for the page to show.
+type checked struct {
+	decision
+	fixes []string // "ockey→hockey"
 }
 
 func (g *Guard) load() {
@@ -96,20 +112,20 @@ func (g *Guard) load() {
 		}
 		if b, err := hex.DecodeString(r.K); err == nil && len(b) == len(k) {
 			copy(k[:], b)
-			g.seen[k] = r.P
+			g.seen[k] = decision{P: r.P, Fixed: r.F}
 		}
 	}
 	log.Printf("[guard] %d earlier decisions loaded from %s", len(g.seen), g.state)
 }
 
 // record appends new decisions. A failed write is logged, not fatal: the decision still holds in memory.
-func (g *Guard) record(keys [][32]byte, ps []float64) {
+func (g *Guard) record(keys [][32]byte, ds []decision) {
 	if g.state == "" {
 		return
 	}
 	var b strings.Builder
 	for i, k := range keys {
-		line, _ := json.Marshal(guardRecord{hex.EncodeToString(k[:]), ps[i]})
+		line, _ := json.Marshal(guardRecord{hex.EncodeToString(k[:]), ds[i].P, ds[i].Fixed})
 		b.Write(line)
 		b.WriteByte('\n')
 	}
@@ -148,11 +164,19 @@ func userText(m map[string]any) (string, func(string), bool) {
 	return "", nil, false
 }
 
-// Apply checks the newest user message if it has no decision yet, then appends the note to every user message
-// whose recorded decision is at or above the threshold -- so a note given once is given again, identically, on
-// every later turn. It returns the newest message's probability and whether it got a note. On a guard failure
-// the messages are left unchanged.
-func (g *Guard) Apply(ctx context.Context, messages []any) (p float64, fired bool, err error) {
+// guardResult describes the newest message: its score, whether it got the note, the spelling fixes made to it,
+// and whether it was decided just now (so the page is told once, not on every replay).
+type guardResult struct {
+	P     float64
+	Fired bool
+	Fixes []string
+	Fresh bool
+}
+
+// Apply checks the newest user message if it has no decision yet, then rewrites every user message from its
+// recorded decision -- spelling corrected, and the note appended at or above the threshold -- so what the model saw
+// once it sees again, byte-identical, on every later turn. On a guard failure the newest message is left unchanged.
+func (g *Guard) Apply(ctx context.Context, messages []any) (res guardResult, err error) {
 	type ref struct {
 		key  [32]byte
 		text string
@@ -169,62 +193,76 @@ func (g *Guard) Apply(ctx context.Context, messages []any) (p float64, fired boo
 		}
 	}
 	if len(refs) == 0 {
-		return 0, false, nil
+		return res, nil
 	}
 
 	// Only the NEWEST message is ever checked. An older message with no recorded decision (history from before
 	// the guard was deployed, or a lost state file) is recorded as exempt WITHOUT a check: the model already saw it
-	// without a note, and giving it one now would change the prefix and re-prefill the whole conversation.
+	// as written, and changing it now would change the prefix and re-prefill the whole conversation.
 	newest := refs[len(refs)-1]
 	g.mu.Lock()
 	var exempt [][32]byte
 	for _, r := range refs[:len(refs)-1] {
 		if _, ok := g.seen[r.key]; !ok {
-			g.seen[r.key] = -1
+			g.seen[r.key] = decision{P: -1}
 			exempt = append(exempt, r.key)
 		}
 	}
 	if len(exempt) > 0 {
-		ps := make([]float64, len(exempt))
-		for i := range ps {
-			ps[i] = -1
+		ds := make([]decision, len(exempt))
+		for i := range ds {
+			ds[i] = decision{P: -1}
 		}
-		g.record(exempt, ps)
+		g.record(exempt, ds)
 	}
 	_, known := g.seen[newest.key]
 	g.mu.Unlock()
 
 	if !known {
-		var ps []float64
-		if ps, err = g.check(ctx, []string{guardText(newest.text)}); err == nil {
+		var cs []checked
+		if cs, err = g.check(ctx, []string{newest.text}); err == nil {
 			g.mu.Lock()
 			if _, dup := g.seen[newest.key]; !dup { // a concurrent request may have decided it meanwhile: first wins
-				g.seen[newest.key] = ps[0]
-				g.record([][32]byte{newest.key}, ps)
+				g.seen[newest.key] = cs[0].decision
+				g.record([][32]byte{newest.key}, []decision{cs[0].decision})
+				res.Fresh, res.Fixes = true, cs[0].fixes
 			}
 			g.mu.Unlock()
 		}
 		// On failure, fail open for THIS message only: nothing is recorded, so next turn it is "older and unseen"
-		// -> exempt, matching what the model is about to see. Earlier notes below are still re-applied -- skipping
-		// them on a guard hiccup would change the prefix, the very cost this design avoids.
+		// -> exempt, matching what the model is about to see. Earlier decisions below are still replayed --
+		// skipping them on a guard hiccup would change the prefix, the very cost this design avoids.
 	}
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i, r := range refs {
-		q, ok := g.seen[r.key]
-		if ok && q >= g.cfg.Threshold {
-			r.set(r.text + "\n\n" + g.cfg.Note)
+		d, ok := g.seen[r.key]
+		text := r.text
+		if ok && d.Fixed != "" {
+			text = d.Fixed
+		}
+		fired := ok && d.P >= g.cfg.Threshold
+		if fired {
+			text += "\n\n" + g.cfg.Note
+		}
+		if text != r.text {
+			r.set(text)
 		}
 		if i == len(refs)-1 {
-			p, fired = q, ok && q >= g.cfg.Threshold
+			res.P, res.Fired = d.P, fired
 		}
 	}
-	return p, fired, err
+	return res, err
 }
 
-func (g *Guard) check(ctx context.Context, texts []string) ([]float64, error) {
-	body, _ := json.Marshal(map[string]any{"texts": texts})
+// check sends texts to the guard without voicebox's [voice] marker and puts the marker back on the corrected text.
+func (g *Guard) check(ctx context.Context, texts []string) ([]checked, error) {
+	bare := make([]string, len(texts))
+	for i, t := range texts {
+		bare[i] = guardText(t)
+	}
+	body, _ := json.Marshal(map[string]any{"texts": bare})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(g.cfg.URL, "/")+"/check", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -236,7 +274,12 @@ func (g *Guard) check(ctx context.Context, texts []string) ([]float64, error) {
 	}
 	defer resp.Body.Close()
 	var out struct {
-		P []float64 `json:"p"`
+		P     []float64 `json:"p"`
+		Fixed []string  `json:"fixed"`
+		Fixes [][]struct {
+			Word    string `json:"word"`
+			Suggest string `json:"suggest"`
+		} `json:"fixes"`
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("guard: HTTP %d", resp.StatusCode)
@@ -247,25 +290,48 @@ func (g *Guard) check(ctx context.Context, texts []string) ([]float64, error) {
 	if len(out.P) != len(texts) {
 		return nil, fmt.Errorf("guard: %d answers for %d texts", len(out.P), len(texts))
 	}
-	return out.P, nil
+	cs := make([]checked, len(texts))
+	for i := range texts {
+		cs[i].P = out.P[i]
+		if i < len(out.Fixed) && out.Fixed[i] != "" && out.Fixed[i] != bare[i] {
+			cs[i].Fixed = texts[i][:len(texts[i])-len(bare[i])] + out.Fixed[i] // the [voice] marker, if any, then the fix
+		}
+		if i < len(out.Fixes) {
+			for _, f := range out.Fixes[i] {
+				cs[i].fixes = append(cs[i].fixes, f.Word+"→"+f.Suggest)
+			}
+		}
+	}
+	return cs, nil
 }
 
-// guardRequest runs the guard over raw["messages"] in place. It returns the notice to show the user when the
-// newest message fired, or "" -- including when the guard is off or failed (logged, never fatal).
+// guardRequest runs the guard over raw["messages"] in place. It returns what to show the user about the newest
+// message when it was decided just now -- spelling fixed, note added, or both -- or "" (including when the guard
+// is off or failed: logged, never fatal).
 func (h *voicebox) guardRequest(ctx context.Context, raw map[string]any) string {
 	if h.guard == nil {
 		return ""
 	}
 	msgs, _ := raw["messages"].([]any)
 	t0 := time.Now()
-	p, fired, err := h.guard.Apply(ctx, msgs)
+	res, err := h.guard.Apply(ctx, msgs)
 	if err != nil {
 		log.Printf("[guard] skipped (%v)", err)
 		return ""
 	}
-	log.Printf("[guard] p=%.3f fired=%v (%d ms)", p, fired, time.Since(t0).Milliseconds())
-	if !fired {
+	log.Printf("[guard] p=%.3f fired=%v fixes=%v (%d ms)", res.P, res.Fired, res.Fixes, time.Since(t0).Milliseconds())
+	if !res.Fresh {
 		return ""
 	}
-	return fmt.Sprintf("guard: this may rest on a nonsensical premise (p %.2f) — note added", p)
+	var parts []string
+	if len(res.Fixes) > 0 {
+		parts = append(parts, "fixed "+strings.Join(res.Fixes, ", "))
+	}
+	if res.Fired {
+		parts = append(parts, fmt.Sprintf("this may rest on a nonsensical premise (p %.2f) — note added", res.P))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "guard: " + strings.Join(parts, "; ")
 }

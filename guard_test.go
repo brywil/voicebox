@@ -12,7 +12,8 @@ import (
 	"testing"
 )
 
-// fakeGuard scores a text 0.9 if it contains "nonsense", else 0.1, and records every text it was asked about.
+// fakeGuard scores a text 0.9 if it contains "nonsense", else 0.1, corrects "sweeden" to "Sweden", and records every
+// text it was asked about.
 type fakeGuard struct {
 	mu    sync.Mutex
 	asked []string
@@ -31,13 +32,20 @@ func (f *fakeGuard) server(t *testing.T) *httptest.Server {
 		f.asked = append(f.asked, req.Texts...)
 		f.mu.Unlock()
 		p := make([]float64, len(req.Texts))
+		fixed := make([]string, len(req.Texts))
+		fixes := make([][]map[string]string, len(req.Texts))
 		for i, s := range req.Texts {
 			p[i] = 0.1
 			if strings.Contains(s, "nonsense") {
 				p[i] = 0.9
 			}
+			fixed[i] = strings.ReplaceAll(s, "sweeden", "Sweden")
+			fixes[i] = []map[string]string{}
+			if fixed[i] != s {
+				fixes[i] = append(fixes[i], map[string]string{"word": "sweeden", "suggest": "Sweden"})
+			}
 		}
-		writeJSON(w, map[string]any{"p": p})
+		writeJSON(w, map[string]any{"p": p, "fixed": fixed, "fixes": fixes})
 	}))
 	t.Cleanup(s.Close)
 	return s
@@ -60,8 +68,8 @@ func TestGuardReplaysTheSameNoteOnLaterTurns(t *testing.T) {
 	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
 
 	t1 := msgs("user", "a nonsense question")
-	if _, fired, err := g.Apply(t.Context(), t1); err != nil || !fired {
-		t.Fatalf("turn 1: fired=%v err=%v, want a note", fired, err)
+	if r, err := g.Apply(t.Context(), t1); err != nil || !r.Fired {
+		t.Fatalf("turn 1: %+v err=%v, want a note", r, err)
 	}
 	noted := content(t1[0])
 	if !strings.HasSuffix(noted, defaultGuardNote) {
@@ -69,9 +77,9 @@ func TestGuardReplaysTheSameNoteOnLaterTurns(t *testing.T) {
 	}
 
 	t2 := msgs("user", "a nonsense question", "assistant", "that makes no sense", "user", "a sound follow-up")
-	_, fired, err := g.Apply(t.Context(), t2)
-	if err != nil || fired {
-		t.Fatalf("turn 2: fired=%v err=%v, want no note on the follow-up", fired, err)
+	r, err := g.Apply(t.Context(), t2)
+	if err != nil || r.Fired {
+		t.Fatalf("turn 2: %+v err=%v, want no note on the follow-up", r, err)
 	}
 	if content(t2[0]) != noted {
 		t.Errorf("turn 2 changed turn 1's message:\n got %q\nwant %q", content(t2[0]), noted)
@@ -90,7 +98,7 @@ func TestGuardNeverNotesUnseenHistory(t *testing.T) {
 	f := &fakeGuard{}
 	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
 	m := msgs("user", "old nonsense", "assistant", "ok", "user", "new and fine")
-	if _, _, err := g.Apply(t.Context(), m); err != nil {
+	if _, err := g.Apply(t.Context(), m); err != nil {
 		t.Fatal(err)
 	}
 	if content(m[0]) != "old nonsense" {
@@ -105,7 +113,7 @@ func TestGuardReadsPastTheVoiceTag(t *testing.T) {
 	f := &fakeGuard{}
 	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
 	m := msgs("user", "[voice] whats the capital of sweeden")
-	_, _, _ = g.Apply(t.Context(), m)
+	_, _ = g.Apply(t.Context(), m)
 	if len(f.asked) != 1 || f.asked[0] != "whats the capital of sweeden" {
 		t.Errorf("guard asked %q, want the text without [voice]", f.asked)
 	}
@@ -117,15 +125,15 @@ func TestGuardFailsOpenAndStaysConsistent(t *testing.T) {
 	f := &fakeGuard{fail: true}
 	g := NewGuard(GuardConfig{URL: f.server(t).URL}, "")
 	m := msgs("user", "nonsense while the guard is down")
-	if _, fired, err := g.Apply(t.Context(), m); err == nil || fired {
-		t.Fatalf("want an error and no note, got fired=%v err=%v", fired, err)
+	if r, err := g.Apply(t.Context(), m); err == nil || r.Fired {
+		t.Fatalf("want an error and no note, got %+v err=%v", r, err)
 	}
 	if content(m[0]) != "nonsense while the guard is down" {
 		t.Fatalf("message edited despite failure: %q", content(m[0]))
 	}
 	f.fail = false
 	m2 := msgs("user", "nonsense while the guard is down", "assistant", "x", "user", "fine")
-	_, _, _ = g.Apply(t.Context(), m2)
+	_, _ = g.Apply(t.Context(), m2)
 	if content(m2[0]) != "nonsense while the guard is down" {
 		t.Errorf("a message the model saw without a note got one later: %q", content(m2[0]))
 	}
@@ -137,12 +145,12 @@ func TestGuardDecisionsSurviveRestart(t *testing.T) {
 	f := &fakeGuard{}
 	srv := f.server(t)
 	m := msgs("user", "a nonsense question")
-	if _, fired, _ := NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m); !fired {
+	if r, _ := NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m); !r.Fired {
 		t.Fatal("first run did not fire")
 	}
 	f.fail = true // a restarted guard that cannot be reached must still replay the note
 	m2 := msgs("user", "a nonsense question", "assistant", "x", "user", "and then?")
-	_, _, _ = NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m2)
+	_, _ = NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m2)
 	if content(m2[0]) != content(m[0]) {
 		t.Errorf("after restart:\n got %q\nwant %q", content(m2[0]), content(m[0]))
 	}
@@ -154,8 +162,8 @@ func TestGuardHandlesArrayContent(t *testing.T) {
 	part := map[string]any{"type": "text", "text": "describe this nonsense"}
 	m := []any{map[string]any{"role": "user", "content": []any{
 		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:,"}}, part}}}
-	if _, fired, err := g.Apply(t.Context(), m); err != nil || !fired {
-		t.Fatalf("fired=%v err=%v", fired, err)
+	if r, err := g.Apply(t.Context(), m); err != nil || !r.Fired {
+		t.Fatalf("%+v err=%v", r, err)
 	}
 	if !strings.HasSuffix(part["text"].(string), defaultGuardNote) {
 		t.Errorf("text part not noted: %q", part["text"])
@@ -199,5 +207,40 @@ func TestChatGuardNoteReachesModelAndNoticeReachesPage(t *testing.T) {
 	}
 	if !strings.Contains(out, "That premise does not hold.") {
 		t.Errorf("model reply not forwarded:\n%s", out)
+	}
+}
+
+// Bryan's swipe typing: the model gets the corrected text, the [voice] marker survives, and the SAME corrected text
+// comes back on later turns (and after a restart) so the prefix never changes.
+func TestGuardFixesSpellingForTheModelAndReplaysIt(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "guard-decisions.jsonl")
+	f := &fakeGuard{}
+	srv := f.server(t)
+	m := msgs("user", "[voice] whats the capital of sweeden")
+	r, err := NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m)
+	if err != nil || !r.Fresh || len(r.Fixes) != 1 || r.Fixes[0] != "sweeden→Sweden" {
+		t.Fatalf("result %+v err=%v, want one fresh fix", r, err)
+	}
+	if got := content(m[0]); got != "[voice] whats the capital of Sweden" {
+		t.Fatalf("model text %q", got)
+	}
+	f.fail = true // replay must not need the guard
+	m2 := msgs("user", "[voice] whats the capital of sweeden", "assistant", "Stockholm.", "user", "and Norway?")
+	_, _ = NewGuard(GuardConfig{URL: srv.URL}, state).Apply(t.Context(), m2)
+	if got := content(m2[0]); got != "[voice] whats the capital of Sweden" {
+		t.Errorf("after restart the correction was not replayed: %q", got)
+	}
+}
+
+func TestGuardNoticeNamesTheFix(t *testing.T) {
+	f := &fakeGuard{}
+	vb := &voicebox{guard: NewGuard(GuardConfig{URL: f.server(t).URL}, "")}
+	raw := map[string]any{"messages": msgs("user", "is sweeden nonsense?")}
+	got := vb.guardRequest(t.Context(), raw)
+	if !strings.Contains(got, "fixed sweeden→Sweden") || !strings.Contains(got, "note added") {
+		t.Errorf("notice %q, want the fix and the note", got)
+	}
+	if again := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "is sweeden nonsense?")}); again != "" {
+		t.Errorf("replay announced again: %q", again)
 	}
 }

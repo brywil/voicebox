@@ -210,7 +210,9 @@ and `laya-guard` (BullshitBench + 55 sound controls, Ornith-1.5):
 **Spelling goes first.** One typo multiplies d1's nonsense false fires about 7x on sound sentences ("Ice ockey is a
 sport..." 0.06 -> 0.82); the guard first corrects the message with a masked-LM spelling checker (ModernBERT,
 `typo_check.py` from the experiment, imported rather than copied) and asks the question of the corrected text,
-which undid 22 of 31 such flips. The correction is used only for asking; the model sees the user's own words.
+which undid 22 of 31 such flips. The corrected text is also what the model gets -- the checker catches swipe-typing
+slips better than the keyboard does -- and every fix is shown on the page (`· guard: fixed ockey→hockey`). Like the
+note, a correction is recorded once and replayed byte-identical on later turns.
 
 The plain question beat a long definitional one on held-out data (AUROC 0.963 vs 0.907) and fired on 0-5% of
 ordinary math, code and instruction prompts. The note's wording mattered more than its wrapper on Ornith: an
@@ -228,7 +230,7 @@ Kolibri) any change to earlier context re-prefills the whole conversation -- sec
 - if the guard is slow or down, that one message goes through without a note (fail open) and stays that way; notes
   on earlier messages are still re-applied.
 
-The stored session keeps the user's own words; the note exists only on the way to the model.
+The stored session keeps the user's own words; corrections and the note exist only on the way to the model.
 
 **Measured live** (2026-10-11, Ornith-1.5 on llama-medium, two-turn conversations through voicebox, llama-server's
 own `prompt_n`): a message the guard fired on cost 42 prompt tokens on turn 1 against 24 for one it did not (the note,

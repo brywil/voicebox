@@ -9,12 +9,12 @@ Ornith a gated note took BullshitBench 0.86 -> ~0.90 for ~0.03 on sound question
 
 Step 1, before the question: SPELLING. A single typo multiplies d1's nonsense false fires about 7x on sound sentences
 ("Ice ockey is a sport..." 0.06 -> 0.82); correcting it first with the masked-LM checker (typo_check.py, ModernBERT,
-~35 ms) undid 22 of 31 such flips. The correction is used only to ask the question -- the model never sees it, since
-the payoff of showing it a correction note has not been measured yet.
+~35 ms) undid 22 of 31 such flips. voicebox also hands the corrected text to the model (Bryan, 2026-10-11: the checker
+catches swipe-typing errors better than the keyboard does) and shows each fix on the page.
 
 Endpoints:
   GET  /health                          -> {"ok": true, "model": ...}
-  POST /check  <- {"texts": [...]}      -> {"p": [...], "fixes": [[{"word","suggest"}...]...], "ms": ...}
+  POST /check  <- {"texts": [...]}      -> {"p": [...], "fixed": [...], "fixes": [[{"word","suggest"}...]...], "ms": ...}
 
 Runs on the GPU in bf16 (~6.5 GB). The memory fraction is capped so a fault is a clean CUDA OOM rather than an
 over-allocation on the GB10's unified memory.
@@ -75,7 +75,8 @@ def check(texts):
     with _lock, torch.inference_mode():
         fixed = [corrected(t[:MAX_CHARS]) for t in texts]
         out = model.system_one_batch([(t, QUESTION) for t, _ in fixed])
-    return [round(float(o["answers"]["nonsense"]["noul"]), 4) for o in out], [f for _, f in fixed]
+    return ([round(float(o["answers"]["nonsense"]["noul"]), 4) for o in out], [t for t, _ in fixed],
+            [f for _, f in fixed])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -103,11 +104,11 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, KeyError) as e:
             return self._json(400, {"error": str(e)})
         t0 = time.time()
-        p, fixes = check(texts) if texts else ([], [])
+        p, fixed, fixes = check(texts) if texts else ([], [], [])
         ms = round((time.time() - t0) * 1000, 1)
         log.info("checked %d text(s) in %.1f ms, max p %.3f, fixes %s", len(texts), ms, max(p, default=0),
                  [f"{x['word']}->{x['suggest']}" for fx in fixes for x in fx])
-        self._json(200, {"p": p, "fixes": fixes, "ms": ms})
+        self._json(200, {"p": p, "fixed": fixed, "fixes": fixes, "ms": ms})
 
     def log_message(self, *a):
         pass
