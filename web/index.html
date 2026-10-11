@@ -149,8 +149,10 @@
      44px is the usual floor for a reliable tap; the primary action gets more. */
   /* Keyboard-dictation mode: no talk button, so the field is the control. */
   body.kbd-mode #text { font-size: 16px; }
+  /* A reply's own controls -- mute while it speaks, replay once it is done -- side by side under it. */
+  .ctl { display: flex; gap: 6px; margin-top: 4px; }
   @media (pointer: coarse) {
-    .replay { padding: 8px 14px; font-size: 14px; min-height: 40px; }
+    .replay, .mute { padding: 8px 14px; font-size: 14px; min-height: 40px; }
     body.kbd-mode #text { flex: 1 0 100%; min-height: 54px; }
     body.kbd-mode footer { gap: 8px; }
     body { font-size: 16px; }
@@ -1254,6 +1256,7 @@ async function send(userText, source = "typed") {
   history.push({ role: "user", content: tag + userText });
 
   const out = addMsg("bot", "", "partial");
+  addSpeakToggle(out);
   // Reasoning models (most of what ollama cloud serves) stream a separate
   // `reasoning` field. It is shown, collapsed, but NEVER spoken -- listening to
   // a model deliberate for thirty seconds before it answers is unusable.
@@ -1629,6 +1632,7 @@ function handleToolEvent(ev, out) {
 function addReplay(out, text) {
   if (!text || !text.trim() || !out.parentNode) return;
   if (out.parentNode.querySelector(".replay")) return;
+  const row = ctlRow(out);
   const b = document.createElement("button");
   b.className = "replay";
   b.textContent = "🔊 replay";
@@ -1640,7 +1644,46 @@ function addReplay(out, text) {
     for (const part of splitForSpeech(text)) ttsQueue.push({ text: part, role: "reply" });
     drainTTS();
   };
-  out.parentNode.appendChild(b);
+  row.appendChild(b);
+}
+
+// ctlRow is the line of controls under a reply, created on first use, so mute and replay sit next to each other.
+function ctlRow(out) {
+  let row = out.parentNode.querySelector(".ctl");
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "ctl";
+    out.parentNode.appendChild(row);
+  }
+  return row;
+}
+
+// The narration switch IS the "Speak replies" setting, reachable under the reply instead of behind ☰, and it acts
+// at once: turning it off silences what is playing and queued, while the reply keeps generating and rendering;
+// turning it on speaks from the next sentence. Unlike ⏹, which clears the queue but lets the next streamed
+// sentence start talking again.
+function setSpeak(on) {
+  $("speak").checked = on;
+  if (!on) stopSpeaking();
+  for (const b of document.querySelectorAll(".mute")) speakToggleLabel(b);
+  updateCrumb();
+  status(on ? "narration on" : "narration off — still generating");
+}
+
+function speakToggleLabel(b) {
+  const on = $("speak").checked;
+  b.textContent = on ? "🔇 mute" : "🔈 speak";
+  b.title = on ? "Stop narrating (the reply keeps generating)" : "Narrate replies again";
+}
+
+// addSpeakToggle puts the narration switch under a reply as soon as it starts. It never touches the request.
+function addSpeakToggle(out) {
+  if (!out.parentNode) return;
+  const b = document.createElement("button");
+  b.className = "mute";
+  speakToggleLabel(b);
+  b.onclick = () => setSpeak(!$("speak").checked);
+  ctlRow(out).appendChild(b);
 }
 
 // splitForSpeech breaks a reply into the same sentence-sized pieces the live
@@ -1857,7 +1900,7 @@ $("clear").onclick = async () => {
   try { await sessionNew(); status("new conversation"); }
   catch { history = []; logEl.innerHTML = ""; status("cleared"); }
 };
-$("speak").onchange = updateCrumb;
+$("speak").onchange = () => setSpeak($("speak").checked);
 ttsEngineEl.addEventListener("change", updateCrumb);
 
 // --- boot -------------------------------------------------------------------

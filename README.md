@@ -382,6 +382,13 @@ patterns are fussier than they first appear.
 stops it dead and clears the queue; starting to talk does too, so barging in
 works. Without that the only options were waiting it out or reloading.
 
+**Muting without stopping.** `⏹` clears what is queued, but the next streamed
+sentence starts talking again. The `🔇 mute` button under each reply, beside
+`🔊 replay`, is the **Speak replies** setting itself: off silences what is playing
+and queued at once while the reply keeps generating and rendering; `🔈 speak`
+turns narration back on from the next sentence. The checkbox behind ☰ and every
+reply's button stay in step.
+
 **Thinking aloud.** With "speak thinking" on, the model's reasoning is read in a
 *different voice*, quieter (volume 0.65, measured: peak amplitude 32767 → 21298)
 and slightly faster. It is an aside, and it should sound like one — otherwise a
