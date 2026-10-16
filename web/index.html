@@ -1101,14 +1101,14 @@ function highlightSpeaking(scroll) {
   const words = normWords(text).split(" ").filter(Boolean);
   if (!words.length) return;
   // Search from where THIS sentence's search began, so re-finding it on pause lands on the same spot.
-  if (nowSpeaking.from === undefined) nowSpeaking.from = hlCursor.get(el) || 0;
-  const from = Math.min(nowSpeaking.from, idx.text.length);
+  if (nowSpeaking.searchFrom === undefined) nowSpeaking.searchFrom = hlCursor.get(el) || 0;
+  const base = Math.min(nowSpeaking.searchFrom, idx.text.length);
   let start = -1;
   for (let k = Math.min(6, words.length); k >= 2 && start < 0; k--) {
-    start = idx.text.indexOf(words.slice(0, k).join(" "), from);
+    start = idx.text.indexOf(words.slice(0, k).join(" "), base);
     if (start < 0) start = idx.text.indexOf(words.slice(0, k).join(" "));
   }
-  if (start < 0) start = idx.text.indexOf(words[0], from);
+  if (start < 0) start = idx.text.indexOf(words[0], base);
   if (start < 0) return;
   const phrase = words.join(" ");
   let end = start + phrase.length;

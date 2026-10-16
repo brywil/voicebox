@@ -372,6 +372,7 @@ const talkBtn = { disabled: false }, talkLabel = any;
 const $ = () => ({ checked: false, value: "", appendChild() {}, scrollTop: 0 });
 const addMsg = () => any, addReplay = () => any, handleToolEvent = () => any;
 const speakStreaming = async () => {}, speakThinkingStream = async () => {};
+let speechTarget = null; const resetHighlightCursor = () => {};   // the speaking-sentence highlight
 const refreshTalkButton = () => {}, applyEffort = (b) => b, stripTag = (s) => s;
 const status = (m, k) => console.log("STATUS " + k + " " + m);
 const models = [], available = () => true, sttEngine = () => "web";
