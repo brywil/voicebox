@@ -155,6 +155,7 @@
   #narrate.off { color: var(--muted); }
   #pause { flex: 0 0 auto; padding: 12px 14px; font-size: 15px; }
   #pause.paused { border-color: var(--accent); color: var(--accent); }
+  ::highlight(vb-speaking) { background-color: color-mix(in srgb, var(--accent) 30%, transparent); }
   @media (pointer: coarse) {
     .who .replay { width: 40px; min-height: 40px; padding: 0; font-size: 16px; }
     body.kbd-mode #text { flex: 1 0 100%; min-height: 54px; }
@@ -1054,6 +1055,77 @@ async function speakPiper(text, role = "reply") {
   console.log(`[voicebox] piper: ${((performance.now() - t0) / 1000).toFixed(2)}s for ${text.length} chars`);
 }
 
+// --- where are we in the text? ---------------------------------------------
+//
+// The sentence being spoken is highlighted in the transcript, and stays highlighted while paused, so
+// glancing back finds your place. It uses the CSS Custom Highlight API, which paints a Range without
+// touching the DOM -- the rendered markdown, links and code are left exactly as they are. Browsers
+// without it (pre-17.2 Safari) simply get no highlight.
+//
+// The spoken text is speakableText() of the raw markdown and the transcript is rendered HTML, so the
+// sentence is found by its WORDS: both sides are reduced to lowercase words and the first few words
+// of the sentence are searched for, starting after the previous match so a repeated phrase lands on
+// the right occurrence.
+let speechTarget = null, nowSpeaking = null;
+const hlCursor = new WeakMap();   // element -> normalised index where the last highlighted sentence ended
+
+function resetHighlightCursor(el) { if (el) hlCursor.set(el, 0); }
+
+function clearHighlight() {
+  nowSpeaking = null;
+  try { CSS.highlights?.delete("vb-speaking"); } catch { /* unsupported */ }
+}
+
+// Index the element's text as a run of lowercase word characters, remembering where each came from.
+function wordIndex(el) {
+  const chars = [], where = [];
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let lastSpace = true;
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    const t = n.nodeValue;
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i].toLowerCase();
+      if (/[\p{L}\p{N}]/u.test(c)) { chars.push(c); where.push([n, i]); lastSpace = false; }
+      else if (!lastSpace) { chars.push(" "); where.push([n, i]); lastSpace = true; }
+    }
+  }
+  return { text: chars.join(""), where };
+}
+
+const normWords = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+function highlightSpeaking(scroll) {
+  if (!nowSpeaking || !("highlights" in CSS) || !nowSpeaking.el.isConnected) return;
+  const { el, text } = nowSpeaking;
+  const idx = wordIndex(el);
+  const words = normWords(text).split(" ").filter(Boolean);
+  if (!words.length) return;
+  // Search from where THIS sentence's search began, so re-finding it on pause lands on the same spot.
+  if (nowSpeaking.from === undefined) nowSpeaking.from = hlCursor.get(el) || 0;
+  const from = Math.min(nowSpeaking.from, idx.text.length);
+  let start = -1;
+  for (let k = Math.min(6, words.length); k >= 2 && start < 0; k--) {
+    start = idx.text.indexOf(words.slice(0, k).join(" "), from);
+    if (start < 0) start = idx.text.indexOf(words.slice(0, k).join(" "));
+  }
+  if (start < 0) start = idx.text.indexOf(words[0], from);
+  if (start < 0) return;
+  const phrase = words.join(" ");
+  let end = start + phrase.length;
+  const tail = words.slice(-3).join(" ");
+  const t = idx.text.indexOf(tail, start);
+  if (t >= 0 && t - start < phrase.length * 2) end = t + tail.length;
+  end = Math.min(end, idx.where.length);
+  const [sn, so] = idx.where[start], [en, eo] = idx.where[end - 1];
+  const range = document.createRange();
+  range.setStart(sn, so);
+  range.setEnd(en, eo + 1);
+  hlCursor.set(el, end);
+  try { CSS.highlights.set("vb-speaking", new Highlight(range)); } catch { return; }
+  // Only when paused: scrolling under someone who is reading back would be worse than no highlight.
+  if (scroll) sn.parentElement?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
 // Interrupting matters more than it sounds. A reasoning model can produce
 // minutes of speech, and without a way to cut it off the only options are
 // waiting it out or reloading the page.
@@ -1066,6 +1138,7 @@ function stopSpeaking() {
   ttsPlaying = false;
   speakQueue = "";
   setSpeaking(false);
+  clearHighlight();
 }
 
 // Pause holds speech exactly where it is. Pausing the <audio> element fires no `ended`, so the clip's
@@ -1086,6 +1159,7 @@ function setPaused(on) {
   if (on) {
     audioEl.pause();
     speechSynthesis.pause();
+    highlightSpeaking(true);     // the page may have re-rendered since the sentence began: find it again
   } else {
     if (audioEl.src && audioEl.paused && !audioEl.ended && audioEl.currentTime > 0) {
       audioEl.play().catch(() => {});
@@ -1169,7 +1243,9 @@ async function drainTTS() {
   while (ttsQueue.length) {
     await untilResumed();
     if (!ttsPlaying) return;     // stopped while paused: stopSpeaking() already reset everything
-    const { text, role } = ttsQueue.shift();
+    const { text, role, el } = ttsQueue.shift();
+    nowSpeaking = el ? { el, text } : null;
+    highlightSpeaking(false);
     try {
       if (ttsEngineEl.value === "piper") await speakPiper(text, role);
       else if (ttsEngineEl.value === "kokoro") await speakKokoro(text);
@@ -1181,6 +1257,7 @@ async function drainTTS() {
   }
   ttsPlaying = false;
   setSpeaking(false);
+  clearHighlight();
 }
 
 function speakSystem(text, role = "reply") {
@@ -1227,7 +1304,7 @@ function speak(text, role = "reply") {
   const clean = speakableText(text);
   // A chunk that was ONLY markup -- a table row, a fence -- has nothing to say.
   if (!clean || !/[a-z0-9]/i.test(clean)) return;
-  ttsQueue.push({ text: clean, role });
+  ttsQueue.push({ text: clean, role, el: role === "reply" ? speechTarget : null });
   drainTTS();
 }
 
@@ -1295,6 +1372,7 @@ async function send(userText, source = "typed") {
   history.push({ role: "user", content: tag + userText });
 
   const out = addMsg("bot", "", "partial");
+  speechTarget = out; resetHighlightCursor(out);
   // Reasoning models (most of what ollama cloud serves) stream a separate
   // `reasoning` field. It is shown, collapsed, but NEVER spoken -- listening to
   // a model deliberate for thirty seconds before it answers is unusable.
@@ -1685,7 +1763,8 @@ function addReplay(out, text) {
     stopSpeaking();
     // Bypasses the "speak replies" checkbox on purpose: pressing replay IS the
     // request, and refusing because a global toggle is off would be obtuse.
-    for (const part of splitForSpeech(text)) ttsQueue.push({ text: part, role: "reply" });
+    resetHighlightCursor(out);
+    for (const part of splitForSpeech(text)) ttsQueue.push({ text: part, role: "reply", el: out });
     drainTTS();
   };
   row.appendChild(b);
