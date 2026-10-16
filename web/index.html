@@ -153,6 +153,8 @@
   .who .replay { display: block; margin-top: 6px; padding: 2px 8px; font-size: 13px; }
   #narrate { flex: 0 0 auto; padding: 12px 14px; font-size: 15px; }
   #narrate.off { color: var(--muted); }
+  #pause { flex: 0 0 auto; padding: 12px 14px; font-size: 15px; }
+  #pause.paused { border-color: var(--accent); color: var(--accent); }
   @media (pointer: coarse) {
     .who .replay { width: 40px; min-height: 40px; padding: 0; font-size: 16px; }
     body.kbd-mode #text { flex: 1 0 100%; min-height: 54px; }
@@ -167,7 +169,7 @@
     /* The talk button takes its own full-width row: it is the one control you
        aim at without looking, often one-handed. */
     #talk { order: -1; flex: 1 0 100%; min-height: 62px; font-size: 18px; padding: 16px; }
-    #shush, #narrate { min-width: 62px; min-height: 50px; font-size: 20px; padding: 12px; }
+    #shush, #narrate, #pause { min-width: 62px; min-height: 50px; font-size: 20px; padding: 12px; }
     /* 16px is not cosmetic: a smaller font makes mobile browsers zoom the page
        on focus, which then leaves the layout scrolled sideways. */
     #text { min-height: 50px; font-size: 16px; padding: 12px 14px; }
@@ -210,6 +212,8 @@
   <button id="shush" title="Stop speaking (Esc)" disabled>⏹</button>
   <!-- The Speak replies setting, one tap away: off silences at once, the reply keeps generating. -->
   <button id="narrate" title="Narration on — tap to mute">🔊</button>
+  <!-- Pause holds speech mid-word and resumes where it stopped; ⏹ throws the queue away. -->
+  <button id="pause" title="Pause speech" disabled>⏸</button>
   <input id="text" placeholder="…or type here and press Enter" />
 </footer>
 
@@ -1037,6 +1041,7 @@ async function speakPiper(text, role = "reply") {
   if (!r.ok) throw new Error(`tts HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
   const blob = await r.blob();
   const url = URL.createObjectURL(blob);
+  await untilResumed();          // paused while this sentence was being synthesised: hold it
   await new Promise((resolve) => {
     const el = audioEl;          // bind now; a device change may swap the global
     el.src = url;
@@ -1053,6 +1058,7 @@ async function speakPiper(text, role = "reply") {
 // minutes of speech, and without a way to cut it off the only options are
 // waiting it out or reloading the page.
 function stopSpeaking() {
+  setPaused(false);              // release the gate first, or a parked sentence would play after the stop
   speechSynthesis.cancel();
   audioEl.pause();
   audioEl.currentTime = 0;
@@ -1061,6 +1067,40 @@ function stopSpeaking() {
   speakQueue = "";
   setSpeaking(false);
 }
+
+// Pause holds speech exactly where it is. Pausing the <audio> element fires no `ended`, so the clip's
+// promise simply waits -- that IS the pause for Piper and Kokoro. The gate covers the gap BETWEEN
+// sentences: replies are spoken sentence by sentence, and the next one is often still being synthesised
+// when pause is tapped, so without the gate it would start playing on its own. The reply keeps
+// generating and queueing underneath; resume picks up mid-word.
+let ttsPaused = false, pauseWaiters = [];
+const pauseBtn = $("pause");
+
+function untilResumed() {
+  return ttsPaused ? new Promise((r) => pauseWaiters.push(r)) : Promise.resolve();
+}
+
+function setPaused(on) {
+  if (on === ttsPaused) return;
+  ttsPaused = on;
+  if (on) {
+    audioEl.pause();
+    speechSynthesis.pause();
+  } else {
+    if (audioEl.src && audioEl.paused && !audioEl.ended && audioEl.currentTime > 0) {
+      audioEl.play().catch(() => {});
+    }
+    speechSynthesis.resume();
+    const w = pauseWaiters; pauseWaiters = [];
+    w.forEach((r) => r());
+  }
+  pauseBtn.textContent = on ? "▶" : "⏸";
+  pauseBtn.title = on ? "Resume speech" : "Pause speech";
+  pauseBtn.classList.toggle("paused", on);
+  try { if ("mediaSession" in navigator && ttsPlaying) navigator.mediaSession.playbackState = on ? "paused" : "playing"; } catch { /* nicety */ }
+}
+
+pauseBtn.onclick = () => { setPaused(!ttsPaused); status(ttsPaused ? "speech paused" : "speech resumed"); };
 
 shushBtn.onclick = () => { stopSpeaking(); status("speech stopped"); };
 // Esc anywhere, because reaching for a button while something is talking at you
@@ -1099,6 +1139,7 @@ textEl.addEventListener("focus", () => {
 function setSpeaking(on) {
   shushBtn.disabled = !on;
   shushBtn.classList.toggle("active", on);
+  pauseBtn.disabled = !on;
 
   // Declare this as a media session. No permission exists for background audio,
   // but a page Chrome recognises as PLAYING MEDIA is treated very differently
@@ -1112,7 +1153,10 @@ function setSpeaking(on) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: "voicebox", artist: modelEl.selectedOptions[0]?.textContent || "reply",
       });
-      navigator.mediaSession.setActionHandler("pause", () => { stopSpeaking(); });
+      // Headset, steering-wheel and lock-screen pause/play now pause and resume, so a button you can
+      // press without looking holds the reply instead of throwing it away. Stop still stops.
+      navigator.mediaSession.setActionHandler("pause", () => { setPaused(true); });
+      navigator.mediaSession.setActionHandler("play", () => { setPaused(false); });
       navigator.mediaSession.setActionHandler("stop", () => { stopSpeaking(); });
     }
   } catch { /* metadata is a nicety; never let it break playback */ }
@@ -1123,6 +1167,8 @@ async function drainTTS() {
   ttsPlaying = true;
   setSpeaking(true);
   while (ttsQueue.length) {
+    await untilResumed();
+    if (!ttsPlaying) return;     // stopped while paused: stopSpeaking() already reset everything
     const { text, role } = ttsQueue.shift();
     try {
       if (ttsEngineEl.value === "piper") await speakPiper(text, role);
@@ -1166,6 +1212,7 @@ async function speakKokoro(text) {
               `${gen.toFixed(1)}s = ${rtf.toFixed(2)}x realtime`);
   if (rtf < 1) status(`Kokoro ${kokoroDevice}: ${rtf.toFixed(2)}x realtime — slower than playback`, "warn");
   const url = URL.createObjectURL(audio.toBlob());
+  await untilResumed();
   await new Promise((resolve) => {
     const el = audioEl;
     el.src = url;
