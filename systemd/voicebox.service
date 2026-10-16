@@ -8,6 +8,7 @@ Wants=network-online.target voicebox-tts.service
 Type=simple
 WorkingDirectory=/home/bryan/src/voicebox
 EnvironmentFile=-/home/bryan/.config/voicebox/voicebox.env
+EnvironmentFile=-/home/bryan/.config/voicebox/guard.env
 ExecStart=/home/bryan/.local/bin/voicebox
 Restart=always
 RestartSec=5

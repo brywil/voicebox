@@ -10,6 +10,7 @@ WorkingDirectory=/home/bryan/src/voicebox
 Environment=VOICEBOX_GUARD_MODEL=/home/bryan/models-prod/d1-3B
 Environment=VOICEBOX_TYPO_MODEL=/home/bryan/models-prod/modernbert-base
 Environment=VOICEBOX_GUARD_HOST=0.0.0.0
+EnvironmentFile=-/home/bryan/.config/voicebox/guard.env
 ExecStart=/home/bryan/gguf-quant-lab/.venv/bin/python guard_server.py
 Restart=always
 RestartSec=5
