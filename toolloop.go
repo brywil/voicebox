@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // The agentic loop.
@@ -85,10 +86,11 @@ func (h *voicebox) handleChat(w http.ResponseWriter, r *http.Request) {
 	// The preflight guard edits raw["messages"] in place (guard.go). The session above has already
 	// recorded the user's own text, so the note never enters the stored conversation.
 	notice := h.guardRequest(r.Context(), raw)
-	if h.guard != nil {
-		if nb, err := json.Marshal(raw); err == nil {
-			body = nb
-		}
+	// voicebox's own system prompt (prompt.go), built per request. The page sends X-Voicebox-Spoken: 1
+	// while narration is on, so the model knows its reply will be heard, not read.
+	applySystemPrompt(raw, r.Header.Get("X-Voicebox-Spoken") == "1", time.Now())
+	if nb, err := json.Marshal(raw); err == nil {
+		body = nb
 	}
 	stream, _ := raw["stream"].(bool)
 

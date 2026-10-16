@@ -198,7 +198,8 @@ func TestChatGuardNoteReachesModelAndNoticeReachesPage(t *testing.T) {
 	if err := json.Unmarshal(upstreamBody, &sent); err != nil {
 		t.Fatalf("upstream body %q: %v", upstreamBody, err)
 	}
-	if got := sent.Messages[0]["content"].(string); !strings.HasSuffix(got, defaultGuardNote) {
+	// The user's turn is the LAST message: voicebox's system prompt (prompt.go) now leads.
+	if got := sent.Messages[len(sent.Messages)-1]["content"].(string); !strings.HasSuffix(got, defaultGuardNote) {
 		t.Errorf("model did not receive the note: %q", got)
 	}
 	out := rec.Body.String()

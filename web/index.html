@@ -360,20 +360,8 @@ function updateCrumb() {
 }
 const talkBtn = $("talk"), textEl = $("text");
 
-// Telling the model that a message was dictated helps it read past recogniser
-// artefacts -- homophones, mangled proper nouns, missing punctuation.
-//
-// Only VOICE is tagged, and the note is deliberately terse. A longer version
-// that also tagged [typed] and explained both cases made a small model (granite
-// 1b) misbehave in two measured ways: it echoed the marker into its own replies
-// ("[typed] As of 2023..."), and once it commented on the phrasing of a message
-// it kept doing so for the rest of the conversation, escalating to suggesting
-// rephrasings instead of answering. Absence of a tag carries "typed" perfectly
-// well, and saying less gives a weak model less to imitate.
-const INPUT_MODE_PREAMBLE =
-  "A message beginning with [voice] was dictated by speech recognition and may " +
-  "contain misheard words. Answer it normally. Never write [voice] yourself and " +
-  "never remark on how the message was entered or worded.";
+// Dictated messages go upstream tagged "[voice] "; the server's prompt (prompt.go) explains the
+// tag to the model, and keeps the measured reasons it says so little.
 
 // A small model may still echo the marker. Strip it rather than show it.
 const stripTag = (t) => t.replace(/^\s*\[(voice|typed)\]\s*/i, "");
@@ -489,7 +477,7 @@ function buildContext() {
     // reconcile them with its own system prompt -- openclaw-go 5104a5a, where a model went in
     // circles over which model it was after a mid-conversation swap.
     //
-    // Rendered here rather than stored, like INPUT_MODE_PREAMBLE above: the transcript keeps
+    // Rendered here rather than stored: the transcript keeps
     // what was actually said, and switching the model again changes which turns get labelled.
     if (m.role === "assistant" && m.model && m.model !== current) {
       content = `[written by ${m.model}, a different model]\n${content}`;
@@ -1278,6 +1266,9 @@ async function send(userText, source = "typed") {
         // The server persists the turn and fans it out to the other devices. Without the
         // session header it simply does not, and the request behaves exactly as it used to.
         ...(sessionId ? { "X-Voicebox-Session": sessionId, "X-Voicebox-Client": CLIENT_ID } : {}),
+        // The server's system prompt (prompt.go) tells the model its reply will be heard, so it
+        // writes for the ear instead of the screen. Read at request time like the other toggles.
+        ...($("speak").checked ? { "X-Voicebox-Spoken": "1" } : {}),
       },
       // Built per request rather than stored in history, so toggling the
       // checkbox takes effect immediately instead of only for new conversations.
@@ -1288,8 +1279,10 @@ async function send(userText, source = "typed") {
         // buildContext() puts the compaction summary in front of the surviving turns, so
         // turns the summary already covers are not resent. `history` holds only those
         // surviving turns -- the compact event prunes it.
-        messages: ($("tagInput").checked && history.some((m) => m.content.startsWith("[voice] ")))
-          ? [{ role: "system", content: INPUT_MODE_PREAMBLE }, ...buildContext()]
+        // With tagging on, the "[voice] " tags go upstream and the server's prompt adds the
+        // misheard-words rule (prompt.go); with it off they are stripped here.
+        messages: $("tagInput").checked
+          ? buildContext()
           : buildContext().map((m) => ({ ...m, content: stripTag(m.content) })),
       })),
     });
