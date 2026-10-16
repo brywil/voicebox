@@ -311,10 +311,11 @@ func (g *Guard) check(ctx context.Context, texts []string) ([]checked, error) {
 }
 
 // guardRequest runs the guard over raw["messages"] in place. It returns what to show the user about the newest
-// message when it was decided just now -- always its score, plus any spelling fix and whether the note was added --
-// or "" (a replayed decision, or the guard off or failed: logged, never fatal). The score is shown below the
-// threshold too, so a near miss (0.45) is visible on the page and not only in the journal.
-func (h *voicebox) guardRequest(ctx context.Context, raw map[string]any) string {
+// message when it was decided just now -- its score, plus any spelling fix and whether the note was added -- or ""
+// (a replayed decision, or the guard off or failed: logged, never fatal). A decision with nothing to report but its
+// score is announced only when showScore is set (the page's "Show the guard's score" box, X-Voicebox-Guard-Score: 1),
+// so by default the page shows a line only when the guard fires or fixes a word.
+func (h *voicebox) guardRequest(ctx context.Context, raw map[string]any, showScore bool) string {
 	if h.guard == nil {
 		return ""
 	}
@@ -326,7 +327,7 @@ func (h *voicebox) guardRequest(ctx context.Context, raw map[string]any) string 
 		return ""
 	}
 	log.Printf("[guard] p=%.3f fired=%v fixes=%v (%d ms)", res.P, res.Fired, res.Fixes, time.Since(t0).Milliseconds())
-	if !res.Fresh {
+	if !res.Fresh || (!res.Fired && len(res.Fixes) == 0 && !showScore) {
 		return ""
 	}
 	parts := []string{fmt.Sprintf("p %.2f", res.P)}

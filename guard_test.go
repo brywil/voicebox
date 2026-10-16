@@ -234,12 +234,15 @@ func TestGuardFixesSpellingForTheModelAndReplaysIt(t *testing.T) {
 	}
 }
 
-// The score is shown on every fresh decision, below the threshold too, so a near miss is visible on the page.
-func TestGuardNoticeShowsScoreBelowThreshold(t *testing.T) {
+// Below the threshold the score is announced only when the page asks for it (its "Show the guard's score" box);
+// by default a sound message gets no line at all.
+func TestGuardNoticeShowsScoreOnlyWhenAsked(t *testing.T) {
 	f := &fakeGuard{}
 	vb := &voicebox{guard: NewGuard(GuardConfig{URL: f.server(t).URL}, "")}
-	got := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "what is the capital of Norway?")})
-	if got != "guard: p 0.10" {
+	if got := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "what is the capital of Norway?")}, false); got != "" {
+		t.Errorf("notice %q, want none when the score was not asked for", got)
+	}
+	if got := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "what is the capital of Denmark?")}, true); got != "guard: p 0.10" {
 		t.Errorf("notice %q, want the score alone", got)
 	}
 }
@@ -248,11 +251,11 @@ func TestGuardNoticeNamesTheFix(t *testing.T) {
 	f := &fakeGuard{}
 	vb := &voicebox{guard: NewGuard(GuardConfig{URL: f.server(t).URL}, "")}
 	raw := map[string]any{"messages": msgs("user", "is sweeden nonsense?")}
-	got := vb.guardRequest(t.Context(), raw)
+	got := vb.guardRequest(t.Context(), raw, false)
 	if !strings.Contains(got, "fixed sweeden→Sweden") || !strings.Contains(got, "note added") || !strings.Contains(got, "p 0.90") {
 		t.Errorf("notice %q, want the fix and the note", got)
 	}
-	if again := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "is sweeden nonsense?")}); again != "" {
+	if again := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "is sweeden nonsense?")}, true); again != "" {
 		t.Errorf("replay announced again: %q", again)
 	}
 }

@@ -231,6 +231,8 @@
       Let the model use tools (search, memory, date)</label>
     <label class="chk"><input type="checkbox" id="tagInput" checked />
       Tell the model when a message was dictated</label>
+    <label class="chk"><input type="checkbox" id="guardScore" />
+      Show the guard's score on every message</label>
   </section>
 
   <section>
@@ -792,6 +794,7 @@ function syncThinkVoices() {
   }
 }
 thinkVoiceEl.onchange = () => localStorage.setItem("vb.thinkvoice", thinkVoiceEl.value);
+$("guardScore").onchange = () => localStorage.setItem("vb.guardscore", $("guardScore").checked ? "1" : "0");
 $("speakThink").onchange = () => {
   localStorage.setItem("vb.speakthink", $("speakThink").checked ? "1" : "0");
   syncThinkVoices();
@@ -1394,6 +1397,7 @@ async function send(userText, source = "typed") {
         // The server's system prompt (prompt.go) tells the model its reply will be heard, so it
         // writes for the ear instead of the screen. Read at request time like the other toggles.
         ...($("speak").checked ? { "X-Voicebox-Spoken": "1" } : {}),
+        ...($("guardScore").checked ? { "X-Voicebox-Guard-Score": "1" } : {}),
       },
       // Built per request rather than stored in history, so toggling the
       // checkbox takes effect immediately instead of only for new conversations.
@@ -2025,6 +2029,7 @@ ttsEngineEl.addEventListener("change", updateCrumb);
     updateCrumb();
   };
   $("speakThink").checked = localStorage.getItem("vb.speakthink") === "1";
+  $("guardScore").checked = localStorage.getItem("vb.guardscore") === "1";
   setSpeaking(false);
   $("tagInput").checked = localStorage.getItem("vb.tag") !== "0";
   $("tagInput").onchange = () => localStorage.setItem("vb.tag", $("tagInput").checked ? "1" : "0");

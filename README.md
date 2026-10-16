@@ -198,8 +198,9 @@ threshold voicebox appends
 
     [Note: this may rest on a nonsensical premise.]
 
-to that message. The page shows the score under every new message (`· guard: p 0.12`), with `— ... note added`
-when it fires, so a near miss is visible without the journal. Measured in `gguf-quant-lab/experiments/liquid-d1`
+to that message, and the page shows `· guard: p 0.76 — ... note added`. With "Show the guard's score on every
+message" checked (Chat settings), every new message also gets its score (`· guard: p 0.12`), so a near miss is
+visible without the journal. Measured in `gguf-quant-lab/experiments/liquid-d1`
 and `laya-guard` (BullshitBench + 55 sound controls, Ornith-1.5):
 
 | | Ornith nonsense | Ornith sound | Kolibri nonsense | Kolibri sound |
