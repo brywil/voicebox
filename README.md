@@ -198,7 +198,8 @@ threshold voicebox appends
 
     [Note: this may rest on a nonsensical premise.]
 
-to that message, and the page shows `· guard: ... note added`. Measured in `gguf-quant-lab/experiments/liquid-d1`
+to that message. The page shows the score under every new message (`· guard: p 0.12`), with `— ... note added`
+when it fires, so a near miss is visible without the journal. Measured in `gguf-quant-lab/experiments/liquid-d1`
 and `laya-guard` (BullshitBench + 55 sound controls, Ornith-1.5):
 
 | | Ornith nonsense | Ornith sound | Kolibri nonsense | Kolibri sound |
@@ -211,7 +212,7 @@ and `laya-guard` (BullshitBench + 55 sound controls, Ornith-1.5):
 sport..." 0.06 -> 0.82); the guard first corrects the message with a masked-LM spelling checker (ModernBERT,
 `typo_check.py` from the experiment, imported rather than copied) and asks the question of the corrected text,
 which undid 22 of 31 such flips. The corrected text is also what the model gets -- the checker catches swipe-typing
-slips better than the keyboard does -- and every fix is shown on the page (`· guard: fixed ockey→hockey`). Like the
+slips better than the keyboard does -- and every fix is shown on the page (`· guard: p 0.06; fixed ockey→hockey`). Like the
 note, a correction is recorded once and replayed byte-identical on later turns.
 
 The plain question beat a long definitional one on held-out data (AUROC 0.963 vs 0.907) and fired on 0-5% of

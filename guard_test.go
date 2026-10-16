@@ -234,12 +234,22 @@ func TestGuardFixesSpellingForTheModelAndReplaysIt(t *testing.T) {
 	}
 }
 
+// The score is shown on every fresh decision, below the threshold too, so a near miss is visible on the page.
+func TestGuardNoticeShowsScoreBelowThreshold(t *testing.T) {
+	f := &fakeGuard{}
+	vb := &voicebox{guard: NewGuard(GuardConfig{URL: f.server(t).URL}, "")}
+	got := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "what is the capital of Norway?")})
+	if got != "guard: p 0.10" {
+		t.Errorf("notice %q, want the score alone", got)
+	}
+}
+
 func TestGuardNoticeNamesTheFix(t *testing.T) {
 	f := &fakeGuard{}
 	vb := &voicebox{guard: NewGuard(GuardConfig{URL: f.server(t).URL}, "")}
 	raw := map[string]any{"messages": msgs("user", "is sweeden nonsense?")}
 	got := vb.guardRequest(t.Context(), raw)
-	if !strings.Contains(got, "fixed sweeden→Sweden") || !strings.Contains(got, "note added") {
+	if !strings.Contains(got, "fixed sweeden→Sweden") || !strings.Contains(got, "note added") || !strings.Contains(got, "p 0.90") {
 		t.Errorf("notice %q, want the fix and the note", got)
 	}
 	if again := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "is sweeden nonsense?")}); again != "" {

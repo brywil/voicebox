@@ -311,8 +311,9 @@ func (g *Guard) check(ctx context.Context, texts []string) ([]checked, error) {
 }
 
 // guardRequest runs the guard over raw["messages"] in place. It returns what to show the user about the newest
-// message when it was decided just now -- spelling fixed, note added, or both -- or "" (including when the guard
-// is off or failed: logged, never fatal).
+// message when it was decided just now -- always its score, plus any spelling fix and whether the note was added --
+// or "" (a replayed decision, or the guard off or failed: logged, never fatal). The score is shown below the
+// threshold too, so a near miss (0.45) is visible on the page and not only in the journal.
 func (h *voicebox) guardRequest(ctx context.Context, raw map[string]any) string {
 	if h.guard == nil {
 		return ""
@@ -328,15 +329,12 @@ func (h *voicebox) guardRequest(ctx context.Context, raw map[string]any) string 
 	if !res.Fresh {
 		return ""
 	}
-	var parts []string
+	parts := []string{fmt.Sprintf("p %.2f", res.P)}
+	if res.Fired {
+		parts[0] += " — this may rest on a nonsensical premise, note added"
+	}
 	if len(res.Fixes) > 0 {
 		parts = append(parts, "fixed "+strings.Join(res.Fixes, ", "))
-	}
-	if res.Fired {
-		parts = append(parts, fmt.Sprintf("this may rest on a nonsensical premise (p %.2f) — note added", res.P))
-	}
-	if len(parts) == 0 {
-		return ""
 	}
 	return "guard: " + strings.Join(parts, "; ")
 }
