@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -243,5 +244,26 @@ func TestGuardNoticeNamesTheFix(t *testing.T) {
 	}
 	if again := vb.guardRequest(t.Context(), map[string]any{"messages": msgs("user", "is sweeden nonsense?")}); again != "" {
 		t.Errorf("replay announced again: %q", again)
+	}
+}
+
+// A guard shared over the LAN can require a token; voicebox must send it from VOICEBOX_GUARD_TOKEN, and send nothing
+// when the variable is unset (the default, and how the Spark's own localhost guard runs).
+func TestGuardSendsTokenOnlyWhenSet(t *testing.T) {
+	var got []string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"p": []float64{0.1}, "fixed": []string{"x"}})
+	}))
+	defer s.Close()
+	g := NewGuard(GuardConfig{URL: s.URL}, "")
+
+	t.Setenv("VOICEBOX_GUARD_TOKEN", "")
+	_, _ = g.check(context.Background(), []string{"hello"})
+	t.Setenv("VOICEBOX_GUARD_TOKEN", "s3cret")
+	_, _ = g.check(context.Background(), []string{"hello"})
+
+	if len(got) != 2 || got[0] != "" || got[1] != "Bearer s3cret" {
+		t.Fatalf("Authorization headers sent = %q; want [\"\" \"Bearer s3cret\"]", got)
 	}
 }

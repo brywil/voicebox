@@ -33,6 +33,12 @@ from transformers import AutoModel
 
 MODEL = os.environ.get("VOICEBOX_GUARD_MODEL", os.path.expanduser("~/models-prod/d1-3B"))
 PORT = int(os.environ.get("VOICEBOX_GUARD_PORT", "8124"))
+# Bind address. 127.0.0.1 by default; the Spark sets 0.0.0.0 so thor's voicebox can use this guard over the LAN (thor's
+# 16 GB card cannot hold d1-3B). The guard is a pure classifier -- no tools, files or keys -- so LAN exposure costs little.
+HOST = os.environ.get("VOICEBOX_GUARD_HOST", "127.0.0.1")
+# Optional shared token. When set, /check requires "Authorization: Bearer <token>" (voicebox sends it from its own
+# VOICEBOX_GUARD_TOKEN). /health stays open so liveness can be probed without it.
+TOKEN = os.environ.get("VOICEBOX_GUARD_TOKEN", "")
 QUESTION = {"nonsense": {"type": "noul", "instructions": "Is this statement nonsense?"}}
 MAX_TEXTS, MAX_CHARS = 64, 8000
 # The spelling checker lives with the experiment that measured it; voicebox imports it rather than keeping a copy that
@@ -96,6 +102,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/check":
             return self._json(404, {"error": "not found"})
+        if TOKEN and self.headers.get("Authorization", "") != "Bearer " + TOKEN:
+            return self._json(401, {"error": "unauthorized"})
         try:
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             texts = req["texts"]
@@ -117,5 +125,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     check(["warm-up"])
-    log.info("guard on 127.0.0.1:%d (%s)", PORT, MODEL)
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    log.info("guard on %s:%d (%s)%s", HOST, PORT, MODEL, " token required" if TOKEN else "")
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

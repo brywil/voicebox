@@ -268,6 +268,11 @@ func (g *Guard) check(ctx context.Context, texts []string) ([]checked, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// A guard shared over the LAN may require a token (guard_server.py VOICEBOX_GUARD_TOKEN); read from the environment
+	// so it stays out of config.json.
+	if tok := os.Getenv("VOICEBOX_GUARD_TOKEN"); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	resp, err := g.client.Do(req)
 	if err != nil {
 		return nil, err
